@@ -1,0 +1,54 @@
+"""Application configuration."""
+
+from pydantic_settings import BaseSettings
+from typing import Literal, Optional
+
+
+class Settings(BaseSettings):
+    """Application settings."""
+
+    # Master API Key for admin operations
+    master_api_key: str = "change-me-in-production"
+
+    # Database
+    database_url: str = "sqlite:///./data/proxy.db"
+
+    # Server (127.0.0.1 = local only; 0.0.0.0 = allow remote)
+    host: str = "127.0.0.1"
+    port: int = 8000
+
+    # Logging
+    log_level: str = "INFO"
+
+    # Storage backend for request/response bodies
+    storage_type: Literal["sqlite", "s3"] = "sqlite"
+
+    # S3 configuration (if storage_type is s3)
+    s3_bucket: Optional[str] = None
+    s3_region: Optional[str] = None
+    s3_access_key: Optional[str] = None
+    s3_secret_key: Optional[str] = None
+
+    # Semantic Cache (disabled by default)
+    cache_enabled: bool = False
+    cache_similarity_threshold: float = 0.95  # 0.0 - 1.0, higher = more strict
+    cache_ttl_seconds: int = 3600  # 1 hour default
+    cache_max_size: int = 10000  # max cached entries
+
+    # Auth cache: avoid DB hit on every request (Helicone-style)
+    auth_cache_ttl_seconds: int = 300  # 5 min
+    auth_cache_max_size: int = 10_000
+
+    # 连接预热：启动时对以下 URL 发一次请求，把 TCP+TLS 建好放进连接池，降低首包延迟
+    # 逗号分隔，如: https://coding.dashscope.aliyuncs.com/v1
+    prewarm_urls: str = ""
+
+    # 上游请求超时（秒）。客户端（如 OpenClaw）单次 LLM 请求超时可能较短，若上游较慢可适当调大
+    upstream_timeout_seconds: float = 120.0
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+
+settings = Settings()

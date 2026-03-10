@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./data/proxy.db
+      - MASTER_API_KEY=${MASTER_API_KEY:-dev-master-key}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # PostgreSQL service (optional - uncomment for production use)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     - POSTGRES_USER=llm_proxy
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+  #     - POSTGRES_DB=llm_proxy
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U llm_proxy"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # MinIO service (optional - for body storage)
+  # minio:
+  #   image: minio/minio:latest
+  #   ports:
+  #     - "9000:9000"
+  #     - "9001:9001"
+  #   environment:
+  #     - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+  #     - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+  #   volumes:
+  #     - minio_data:/data
+  #   command: server /data --console-address ":9001"
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+  #     interval: 30s
+  #     timeout: 20s
+  #     retries: 3
+
+# volumes:
+#   postgres_data:
+#   minio_data:

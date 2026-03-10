@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.bak
+
+# Data
+data/*.db
+data/*.sqlite
+data/*.shm
+data/*.wal
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary test files
+scripts/tests/test_*.py
+
+# Claude Code local settings (may contain exposed API keys)
+.claude/

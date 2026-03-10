@@ -1,0 +1,3 @@
+# Naming the first approver as default until more are added
+default:
+  - Xiang3999
