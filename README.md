@@ -5,65 +5,75 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-purple)](https://github.com/astral-sh/ruff)
 
-一个用 Python 编写的轻量级 LLM API 代理监控系统，用于观察和分析不同应用对 LLM API 的调用情况。
+[🇨🇳 中文版 README](docs/README.zh-CN.md)
+
+A lightweight LLM API proxy for monitoring and analyzing LLM API calls across different applications. Built with Python and FastAPI.
 
 ---
 
-## 📑 目录
+## 📑 Table of Contents
 
-- [功能特性](#-功能特性)
-- [快速开始](#-快速开始)
-- [使用方式](#-使用方式)
-- [架构设计](#-架构设计)
-- [核心模块](#-核心模块)
-- [配置项](#-配置项)
-- [语义缓存](#-语义缓存)
-- [开发](#-开发)
-- [贡献](#-贡献)
+- [Features](#-features)
+- [Quick Start](#-quick-start)
+- [Usage](#-usage)
+- [Architecture](#-architecture)
+- [Core Modules](#-core-modules)
+- [Configuration](#-configuration)
+- [Semantic Cache](#-semantic-cache)
+- [Development](#-development)
+- [Contributing](#-contributing)
 - [License](#-license)
 
-## 功能特性
+## ✨ Features
 
-- 🔍 **API Proxy** - 拦截和转发 LLM API 请求（支持 OpenAI、Anthropic 等）
-- 📊 **请求记录** - 完整记录每个 API 调用的请求和响应内容
-- ⏱️ **延迟监控** - 记录首 Token 时间、总延迟等性能指标
-- 💰 **Token 统计** - 自动计算 prompt/completion/total tokens
-- 🔑 **多应用隔离** - 通过 Proxy Key 为不同应用创建独立的 API Key
-- 📈 **分析查询** - 按应用、时间、模型等维度分析使用情况
-- 🎛️ **Web Dashboard** - 简单的 Web 界面查看记录和分析
-- 🚀 **语义缓存** - 基于语义相似度的响应缓存（默认关闭，可减少重复 API 调用）
+- 🔍 **API Proxy** - Intercept and forward LLM API requests (supports OpenAI, Anthropic, etc.)
+- 📊 **Request Recording** - Complete logging of request and response content for each API call
+- ⏱️ **Latency Monitoring** - Track first token time, total latency, and other performance metrics
+- 💰 **Token Statistics** - Automatic calculation of prompt/completion/total tokens
+- 🔑 **Multi-Application Isolation** - Create independent API keys for different applications via Proxy Keys
+- 📈 **Analytics** - Analyze usage by application, time range, model, and more
+- 🎛️ **Web Dashboard** - Simple web interface to view logs and analytics
+- 🚀 **Semantic Cache** - Response caching based on semantic similarity (disabled by default, reduces redundant API calls)
 
-## 快速开始
+## 🚀 Quick Start
 
-### 使用 Docker（推荐）
+### Run Locally (Recommended)
 
 ```bash
+# Clone the repository
+git clone https://github.com/Xiang3999/llm-observability-proxy.git
+cd llm-observability-proxy
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure environment variables
+export MASTER_API_KEY="your-master-key"
+export DATABASE_URL="sqlite:///./data/proxy.db"
+
+# Start the service
+python -m src.main
+```
+
+Access the dashboard at http://localhost:8000
+
+### Using Docker (Optional)
+
+```bash
+# Build Docker image locally
+docker build -f docker/Dockerfile -t llm-observability-proxy:latest .
+
+# Run the container
 docker run -d --name llm-proxy \
   -p 8000:8000 \
   -v ./data:/app/data \
   -e MASTER_API_KEY="your-master-key" \
-  ghcr.io/xiang3999/llm-observability-proxy:latest
+  llm-observability-proxy:latest
 ```
 
-### 本地运行
+## 💡 Usage
 
-```bash
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置环境变量
-export MASTER_API_KEY="your-master-key"
-export DATABASE_URL="sqlite:///./data/proxy.db"
-
-# 启动服务
-python -m src.main
-```
-
-访问 http://localhost:8000 查看 Dashboard
-
-## 使用方式
-
-### 1. 创建 Proxy Key
+### 1. Create a Proxy Key
 
 ```bash
 curl -X POST http://localhost:8000/api/proxy-keys \
@@ -72,14 +82,14 @@ curl -X POST http://localhost:8000/api/proxy-keys \
   -d '{"name": "my-app", "provider": "openai", "provider_key": "sk-xxx"}'
 ```
 
-### 2. 使用 Proxy Key 调用 API
+### 2. Use Proxy Key to Call API
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="sk-helicone-proxy-xxx"  # 你的 Proxy Key
+    api_key="sk-proxy-key-xxx"  # Your Proxy Key
 )
 
 response = client.chat.completions.create(
@@ -88,24 +98,28 @@ response = client.chat.completions.create(
 )
 ```
 
-### 3. 查看分析数据
+### 3. View Analytics Data
 
 ```bash
-# 获取所有请求
+# Get all requests
 curl http://localhost:8000/api/requests \
   -H "Authorization: Bearer your-master-key"
 
-# 按应用统计
+# Get stats by application
 curl http://localhost:8000/api/stats/by-app \
+  -H "Authorization: Bearer your-master-key"
+
+# Get stats by model
+curl http://localhost:8000/api/stats/by-model \
   -H "Authorization: Bearer your-master-key"
 ```
 
-## 架构设计
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Client Application                      │
-│                 (使用 Proxy Key 调用 API)                      │
+│                 (Call API using Proxy Key)                   │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
@@ -121,57 +135,57 @@ curl http://localhost:8000/api/stats/by-app \
           │               │               │
           ▼               ▼               ▼
 ┌─────────────────┐ ┌─────────────┐ ┌─────────────┐
-│   PostgreSQL    │ │   SQLite    │ │    MinIO    │
-│   (生产环境)    │ │   (开发)    │ │   (Body)    │
+│   PostgreSQL    │ │   SQLite    │ │   File/     │
+│   (Production)  │ │   (Dev)     │ │   SQLite    │
 └─────────────────┘ └─────────────┘ └─────────────┘
 ```
 
-## 核心模块
+## 📦 Core Modules
 
-| 模块 | 说明 |
-|------|------|
-| `src/proxy/` | API 代理核心逻辑 |
-| `src/auth/` | 认证和 API Key 管理 |
-| `src/recorder/` | 请求/响应记录 |
-| `src/analytics/` | 分析和查询 |
+| Module | Description |
+|--------|-------------|
+| `src/proxy/` | API proxy core logic |
+| `src/auth/` | Authentication and API Key management |
+| `src/recorder/` | Request/Response recording |
+| `src/analytics/` | Analytics and querying |
 | `src/web/` | Web Dashboard |
-| `src/models/` | 数据模型 |
+| `src/models/` | Data models |
 
-## 配置项
+## ⚙️ Configuration
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `MASTER_API_KEY` | 管理 API Key | 必填 |
-| `DATABASE_URL` | 数据库连接 | `sqlite:///./data/proxy.db` |
-| `LOG_LEVEL` | 日志级别 | `INFO` |
-| `HOST` | 监听地址 | `0.0.0.0` |
-| `PORT` | 监听端口 | `8000` |
-| `CACHE_ENABLED` | 是否启用语义缓存 | `false` |
-| `CACHE_SIMILARITY_THRESHOLD` | 缓存相似度阈值 (0.0-1.0) | `0.95` |
-| `CACHE_TTL_SECONDS` | 缓存过期时间 (秒) | `3600` |
-| `CACHE_MAX_SIZE` | 最大缓存条目数 | `10000` |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MASTER_API_KEY` | Master API Key for admin operations | Required |
+| `DATABASE_URL` | Database connection URL | `sqlite:///./data/proxy.db` |
+| `LOG_LEVEL` | Logging level | `INFO` |
+| `HOST` | Server bind address | `127.0.0.1` |
+| `PORT` | Server port | `8000` |
+| `CACHE_ENABLED` | Enable semantic cache | `false` |
+| `CACHE_SIMILARITY_THRESHOLD` | Cache similarity threshold (0.0-1.0) | `0.95` |
+| `CACHE_TTL_SECONDS` | Cache TTL in seconds | `3600` |
+| `CACHE_MAX_SIZE` | Maximum cache entries | `10000` |
 
-## 语义缓存
+## 🧠 Semantic Cache
 
-语义缓存功能可以基于请求的语义相似度返回缓存的响应，减少重复的 LLM API 调用。
+Semantic cache returns cached responses based on prompt semantic similarity, reducing redundant LLM API calls.
 
-### 启用缓存
+### Enable Cache
 
 ```bash
 export CACHE_ENABLED=true
-export CACHE_SIMILARITY_THRESHOLD=0.95  # 相似度超过 95% 返回缓存
+export CACHE_SIMILARITY_THRESHOLD=0.95  # Return cache if similarity > 95%
 ```
 
-### 缓存工作原理
+### How It Works
 
-1. **请求到来时**：计算请求 prompt 的嵌入向量
-2. **相似度搜索**：在缓存中查找语义相似的请求
-3. **阈值判断**：相似度超过阈值则返回缓存响应
-4. **响应缓存**：未命中时将 LLM 响应缓存
+1. **On Request**: Calculate embedding vector of the request prompt
+2. **Similarity Search**: Find semantically similar requests in cache
+3. **Threshold Check**: Return cached response if similarity exceeds threshold
+4. **Cache Response**: Cache LLM response on cache miss
 
-### 缓存响应标识
+### Cache Response Indicators
 
-缓存命中的响应会包含以下标识：
+Cached responses include:
 ```json
 {
   "helicone_cache_hit": true,
@@ -179,48 +193,51 @@ export CACHE_SIMILARITY_THRESHOLD=0.95  # 相似度超过 95% 返回缓存
 }
 ```
 
-响应头也会包含：
+Response headers also include:
 ```
 X-Helicone-Cache-Hit: true
 X-Helicone-Cache-Similarity: 0.98
 ```
 
-### 注意事项
+### Notes
 
-- 当前使用基于 hash 的伪嵌入（演示用途）
-- 生产环境建议替换为真实嵌入模型（如 OpenAI embeddings、Sentence Transformers）
-- 缓存数据存储在内存中，重启后丢失
-- 生产环境建议使用 Redis 或专用向量数据库
+- Currently uses hash-based pseudo-embedding (demo purpose)
+- For production, replace with real embedding models (OpenAI embeddings, Sentence Transformers)
+- Cache is stored in memory and lost on restart
+- For production, consider using Redis or a dedicated vector database
 
-## 开发
+## 🛠️ Development
 
 ```bash
-# 运行测试
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests
 pytest tests/
 
-# 代码检查
+# Lint code
 ruff check src/
 
-# 类型检查
+# Type check
 mypy src/
 ```
 
-## 🤝 贡献
+## 🤝 Contributing
 
-我们欢迎各种形式的贡献！请查看我们的 [贡献指南](CONTRIBUTING.md) 了解如何参与项目开发。
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on how to participate in the project.
 
-- 🐛 [报告问题](https://github.com/Xiang3999/llm-observability-proxy/issues/new?template=bug_report.yml)
-- 💡 [建议功能](https://github.com/Xiang3999/llm-observability-proxy/issues/new?template=feature_request.yml)
-- 🔧 [提交 PR](https://github.com/Xiang3999/llm-observability-proxy/pulls)
+- 🐛 [Report a Bug](https://github.com/Xiang3999/llm-observability-proxy/issues/new?template=bug_report.yml)
+- 💡 [Suggest a Feature](https://github.com/Xiang3999/llm-observability-proxy/issues/new?template=feature_request.yml)
+- 🔧 [Submit a PR](https://github.com/Xiang3999/llm-observability-proxy/pulls)
 
 ## 📄 License
 
-MIT License - 查看 [LICENSE](LICENSE) 文件了解详情。
+MIT License - See [LICENSE](LICENSE) file for details.
 
-## 🔗 相关链接
+## 🔗 Related Links
 
-- [架构文档](ARCHITECTURE.md)
-- [使用示例](EXAMPLES.md)
-- [变更日志](CHANGELOG.md)
-- [行为准则](CODE_OF_CONDUCT.md)
-- [安全政策](SECURITY.md)
+- [Architecture Documentation](ARCHITECTURE.md)
+- [Usage Examples](EXAMPLES.md)
+- [Changelog](CHANGELOG.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
