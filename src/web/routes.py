@@ -62,6 +62,90 @@ def get_cache_read_info(request_log: RequestLog) -> str:
     return "-"
 
 
+def render_request_table_row(
+    req: RequestLog,
+    proxy_names: Optional[Dict[str, str]] = None,
+    app_id: Optional[str] = None,
+    style: str = "default",
+) -> str:
+    """
+    Render a single request log table row.
+
+    Args:
+        req: RequestLog instance
+        proxy_names: Optional dict mapping proxy_key_id to name
+        app_id: Optional app_id for 'from_app' link parameter
+        style: 'default' for full table, 'compact' for analytics table,
+               'system-prompt' for system prompt detail page
+
+    Returns:
+        HTML string for table row
+    """
+    status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
+    cache_display = get_cache_read_info(req)
+    cron_task_id = extract_cron_task_info(req.request_body)
+    cron_display = (
+        f'<span class="text-xs font-mono text-blue-600">{cron_task_id[:8] if cron_task_id else "-"}</span>'
+        if cron_task_id
+        else '<span class="text-xs text-gray-400">-</span>'
+    )
+
+    if style == "compact":
+        # Compact style for Analytics page
+        n_msg = len(req.request_body.get("messages", [])) if req.request_body else 0
+        from_app = f"?from_app={app_id}" if app_id else ""
+        return (
+            f'<tr class="hover:bg-gray-50">'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.created_at.strftime("%m-%d %H:%M")}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{n_msg}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium"><a href="/requests/{req.id}{from_app}" class="text-blue-600 hover:text-blue-900">View</a></td>'
+            f'</tr>'
+        )
+    elif style == "system-prompt":
+        # System prompt detail style - compact with proxy name
+        time_str = req.created_at.strftime("%m-%d %H:%M:%S")
+        proxy_name = proxy_names.get(req.proxy_key_id, "Unknown") if proxy_names else "Unknown"
+        return (
+            f'<tr class="hover:bg-gray-50">'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{time_str}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{proxy_name}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium">'
+            f'<a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
+            f'</td>'
+            f'</tr>'
+        )
+    else:
+        # Default style for Dashboard and Requests pages
+        time_str = req.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        proxy_name = proxy_names.get(req.proxy_key_id, "Unknown") if proxy_names else "Unknown"
+        return (
+            f'<tr>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{time_str}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{proxy_name}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{req.model or "-"}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_tokens or "-"}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_latency_ms or "-"}ms</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${float(req.cost_usd or 0):.4f}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cache_display}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm">{cron_display}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium"><a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a></td>'
+            f'</tr>'
+        )
+
+
 def get_prompt_hash(content: str) -> str:
     """Generate short hash for prompt identification."""
     import hashlib
@@ -71,11 +155,23 @@ def get_prompt_hash(content: str) -> str:
 def extract_system_prompts(requests: List[RequestLog]) -> dict:
     """
     Extract system prompts from requests and aggregate.
+
+    Performance optimizations:
+    - Single-pass O(n) processing
+    - Uses local variable references for speed
+    - Early break after finding first system prompt per request
+
     Returns: {prompt_hash: {"content": str, "count": int, "first_seen": datetime,
                            "last_seen": datetime, "daily_counts": Dict[str, int],
                            "model_counts": Dict[str, int], "requests": List[RequestLog]}}
     """
+    from collections import defaultdict
+
     result = {}
+
+    # Cache local references for speed in tight loop
+    _get_prompt_hash = get_prompt_hash
+    _strftime = datetime.strftime
 
     for req in requests:
         request_body = req.request_body or {}
@@ -91,7 +187,7 @@ def extract_system_prompts(requests: List[RequestLog]) -> dict:
                         for item in content
                     )
 
-                prompt_hash = get_prompt_hash(content)
+                prompt_hash = _get_prompt_hash(content)
 
                 if prompt_hash not in result:
                     result[prompt_hash] = {
@@ -99,31 +195,35 @@ def extract_system_prompts(requests: List[RequestLog]) -> dict:
                         "count": 0,
                         "first_seen": req.created_at,
                         "last_seen": req.created_at,
-                        "daily_counts": {},
-                        "model_counts": {},
+                        "daily_counts": defaultdict(int),
+                        "model_counts": defaultdict(int),
                         "requests": []
                     }
 
-                result[prompt_hash]["count"] += 1
-                result[prompt_hash]["requests"].append(req)
+                data = result[prompt_hash]
+                data["count"] += 1
+                data["requests"].append(req)
 
                 # Update first/last seen
-                if req.created_at < result[prompt_hash]["first_seen"]:
-                    result[prompt_hash]["first_seen"] = req.created_at
-                if req.created_at > result[prompt_hash]["last_seen"]:
-                    result[prompt_hash]["last_seen"] = req.created_at
+                if req.created_at < data["first_seen"]:
+                    data["first_seen"] = req.created_at
+                if req.created_at > data["last_seen"]:
+                    data["last_seen"] = req.created_at
 
                 # Daily counts
                 date_str = req.created_at.strftime("%Y-%m-%d")
-                result[prompt_hash]["daily_counts"][date_str] = \
-                    result[prompt_hash]["daily_counts"].get(date_str, 0) + 1
+                data["daily_counts"][date_str] += 1
 
                 # Model counts
                 model = req.model or "unknown"
-                result[prompt_hash]["model_counts"][model] = \
-                    result[prompt_hash]["model_counts"].get(model, 0) + 1
+                data["model_counts"][model] += 1
 
                 break  # Only count first system prompt per request
+
+    # Convert defaultdicts to regular dicts for JSON serialization
+    for data in result.values():
+        data["daily_counts"] = dict(data["daily_counts"])
+        data["model_counts"] = dict(data["model_counts"])
 
     return result
 
@@ -229,24 +329,7 @@ async def dashboard(
         )
     proxy_keys_rows = "".join(_proxy_key_row(app) for app in apps)
 
-    def _recent_req_row(req):
-        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
-        cache_display = get_cache_read_info(req)
-        cron_task_id = extract_cron_task_info(req.request_body)
-        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}"</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
-        return (
-            f'<tr><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.created_at.strftime("%Y-%m-%d %H:%M:%S")}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{req.model or "-"}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_tokens or "-"}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_latency_ms or "-"}ms</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{req.status_code or "N/A"}</span></td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${float(req.cost_usd or 0):.4f}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cache_display}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm">{cron_display}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium"><a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a></td></tr>'
-        )
-    recent_requests_rows = "".join(_recent_req_row(req) for req in recent_requests)
+    recent_requests_rows = "".join(render_request_table_row(req, proxy_names=proxy_names) for req in recent_requests)
     provider_key_options = "".join([f'<option value="{pk.id}">{pk.name} ({pk.provider.value})</option>' for pk in provider_keys])
     provider_key_msg = '<p class="text-sm text-red-500 mt-2">No provider keys configured. Please add a provider key first.</p>' if not provider_keys else ""
 
@@ -512,7 +595,7 @@ async def list_requests(
     """List all requests with pagination and filters."""
     from sqlalchemy import select, func
 
-    per_page = 50
+    per_page = settings.default_per_page
     offset = (page - 1) * per_page
 
     # Build base query with filters
@@ -558,24 +641,7 @@ async def list_requests(
     app_options = "".join([f'<option value="{app.id}" {"selected" if app_id == app.id else ""}>{app.name}</option>' for app in apps])
     model_options = "".join([f'<option value="{m}" {"selected" if model == m else ""}>{m}</option>' for m in models])
 
-    def _req_row(req):
-        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
-        cron_task_id = extract_cron_task_info(req.request_body)
-        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
-        cache_display = get_cache_read_info(req)
-        return (
-            f'<tr><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.created_at.strftime("%Y-%m-%d %H:%M:%S")}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{req.model or "-"}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_tokens or "-"}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_latency_ms or "-"}ms</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{req.status_code or "N/A"}</span></td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${float(req.cost_usd or 0):.4f}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cache_display}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm">{cron_display}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium"><a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a></td></tr>'
-        )
-    request_rows = "".join(_req_row(req) for req in requests_list)
+    request_rows = "".join(render_request_table_row(req, proxy_names=proxy_names) for req in requests_list)
     empty_req_msg = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">No requests found</td></tr>' if not requests_list else ""
 
     prev_q = "&".join([f"app_id={app_id}" if app_id else "", f"model={model}" if model else "", f"status={status}" if status else ""])
@@ -1109,8 +1175,8 @@ async def view_request_detail(
 async def view_application_analytics(
     app_id: str,
     db: DbSession,
-    days: int = 7,
-    limit: int = 100,
+    days: int = None,
+    limit: int = None,
     is_cron_task: Optional[str] = None,
     cron_task: Optional[str] = None,
 ):
@@ -1118,6 +1184,12 @@ async def view_application_analytics(
     from sqlalchemy import select, func
     import json
     from datetime import timedelta
+
+    # Use config defaults if not provided
+    if days is None:
+        days = settings.default_days
+    if limit is None:
+        limit = settings.default_limit
 
     # Get proxy key info
     result = await db.execute(
@@ -1394,24 +1466,7 @@ async def view_application_analytics(
         for status, count in sorted(status_counts.items())
     ])
 
-    def _analytics_req_row(req):
-        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
-        n_msg = len(req.request_body.get("messages", [])) if req.request_body else 0
-        cron_task_id = extract_cron_task_info(req.request_body)
-        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}"</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
-        cache_display = get_cache_read_info(req)
-        return (
-            f'<tr class="hover:bg-gray-50"><td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.created_at.strftime("%m-%d %H:%M")}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{n_msg}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium"><a href="/requests/{req.id}?from_app={app_id}" class="text-blue-600 hover:text-blue-900">View</a></td></tr>'
-        )
-    request_history_rows = "".join(_analytics_req_row(req) for req in all_requests)
+    request_history_rows = "".join(render_request_table_row(req, app_id=app_id, style="compact") for req in all_requests)
     request_history_empty = '<tr><td colspan="9" class="px-4 py-4 text-center text-gray-500">No requests found</td></tr>' if not all_requests else ""
 
     app_tabs = render_app_tabs(app_id, proxy_key.name, "analytics")
@@ -2033,15 +2088,20 @@ async def list_system_prompts(
     model: Optional[str] = None,
     status: Optional[str] = None,
     cron_task: Optional[str] = None,
-    days: int = 7,
-    limit: int = 100,
+    days: int = None,
+    limit: int = None,
     page: int = 1,
 ):
     """List all system prompts with aggregation and filters."""
     from sqlalchemy import select, func
     import html as html_lib
 
-    per_page = 50
+    # Use config defaults if not provided
+    if days is None:
+        days = settings.default_days
+    if limit is None:
+        limit = settings.default_limit
+    per_page = settings.system_prompts_per_page
     offset = (page - 1) * per_page
 
     # Build base query with filters
@@ -2073,7 +2133,8 @@ async def list_system_prompts(
                 filtered_requests.append(req)
         all_requests = filtered_requests
 
-    # Apply limit for processing
+    # Apply limit for processing (cap at max for performance)
+    limit = min(limit, settings.max_analysis_limit)
     analysis_requests = all_requests[:limit]
 
     # Extract and aggregate system prompts
@@ -2400,11 +2461,15 @@ async def compare_system_prompts(
     prompts: str,  # Comma-separated prompt hashes
     app_id: Optional[str] = None,
     model: Optional[str] = None,
-    days: int = 7,
+    days: int = None,
 ):
     """Compare multiple system prompts side by side."""
     import html as html_lib
     import json
+
+    # Use config default if not provided
+    if days is None:
+        days = settings.default_days
 
     prompt_hashes = [h.strip() for h in prompts.split(",") if h.strip()]
 
@@ -2691,12 +2756,18 @@ async def view_system_prompt_detail(
     db: DbSession,
     app_id: Optional[str] = None,
     model: Optional[str] = None,
-    days: int = 7,
-    limit: int = 100,
+    days: int = None,
+    limit: int = None,
 ):
     """View detailed information about a specific system prompt."""
     import html as html_lib
     import json
+
+    # Use config defaults if not provided
+    if days is None:
+        days = settings.default_days
+    if limit is None:
+        limit = settings.default_limit
 
     # Build base query with filters
     query = select(RequestLog).order_by(RequestLog.created_at.desc())
@@ -2741,28 +2812,7 @@ async def view_system_prompt_detail(
     prompt_content_escaped = html_lib.escape(prompt_info["content"])
 
     # Build request rows
-    def _req_row(req):
-        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
-        cache_display = get_cache_read_info(req)
-        cron_task_id = extract_cron_task_info(req.request_body)
-        cron_display = f'<span class="text-xs font-mono text-blue-600">{cron_task_id[:8] if cron_task_id else "-"}</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
-
-        return (
-            f'<tr class="hover:bg-gray-50">'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.created_at.strftime("%m-%d %H:%M:%S")}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium">'
-            f'<a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
-            f'</td></tr>'
-        )
-
-    request_rows = "".join(_req_row(req) for req in recent_requests)
+    request_rows = "".join(render_request_table_row(req, proxy_names=proxy_names, style="system-prompt") for req in recent_requests)
     empty_msg = '<tr><td colspan="9" class="px-4 py-4 text-center text-gray-500">No requests found</td></tr>' if not request_rows else ""
 
     # Model distribution HTML

@@ -46,6 +46,31 @@ class Settings(BaseSettings):
     # 上游请求超时（秒）。客户端（如 OpenClaw）单次 LLM 请求超时可能较短，若上游较慢可适当调大
     upstream_timeout_seconds: float = 120.0
 
+    # =====================================================================
+    # UI Pagination and Filtering Defaults
+    # =====================================================================
+
+    # Default pagination size for request lists
+    default_per_page: int = 50
+
+    # Default time range (days) for analytics and filtering
+    default_days: int = 7
+
+    # Default limit for request analysis
+    default_limit: int = 100
+
+    # Available time range options (days)
+    days_options: list = [1, 3, 7, 30, 90, 0]  # 0 = All time
+
+    # Available limit options
+    limit_options: list = [100, 500, 1000, 5000]
+
+    # Maximum limit for analysis (performance protection)
+    max_analysis_limit: int = 10000
+
+    # System prompts page size
+    system_prompts_per_page: int = 50
+
     class Config:
         env_file = ".env"
         case_sensitive = False
