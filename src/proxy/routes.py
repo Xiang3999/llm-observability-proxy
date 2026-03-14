@@ -141,7 +141,10 @@ def _normalize_usage(usage: dict) -> dict:
 
 
 def _parse_openai_stream_chunks(chunks: list[bytes]) -> dict:
-    """Parse OpenAI-style SSE chunks into one response dict (choices[0].message.content + usage)."""
+    """Parse OpenAI-style SSE chunks into one response dict.
+
+    Captures all fields: content, reasoning_content, tool_calls, usage, etc.
+    """
     if not chunks:
         return {"stream": True}
     try:
@@ -149,9 +152,14 @@ def _parse_openai_stream_chunks(chunks: list[bytes]) -> dict:
     except Exception:
         return {"stream": True}
     content_parts = []
+    reasoning_content_parts = []
+    reasoning_content_thinking_parts = []
+    tool_calls = []
     usage = {}
     response_id = None
     model = None
+    finish_reason = "stop"
+
     # Split by double newline to get full SSE events (usage often in last event, may span chunk boundary)
     for block in raw.split("\n\n"):
         block = block.strip()
@@ -174,8 +182,24 @@ def _parse_openai_stream_chunks(chunks: list[bytes]) -> dict:
                 choices = obj.get("choices") or []
                 if choices and isinstance(choices[0], dict):
                     delta = choices[0].get("delta") or {}
-                    if isinstance(delta, dict) and "content" in delta and delta["content"]:
-                        content_parts.append(delta["content"])
+                    if isinstance(delta, dict):
+                        # Capture content
+                        if "content" in delta and delta["content"]:
+                            content_parts.append(delta["content"])
+                        # Capture reasoning_content (DeepSeek / OpenAI reasoning models)
+                        if "reasoning_content" in delta and delta["reasoning_content"]:
+                            reasoning_content_parts.append(delta["reasoning_content"])
+                        # Capture reasoning_content_thinking (some providers)
+                        if "reasoning_content_thinking" in delta and delta["reasoning_content_thinking"]:
+                            reasoning_content_thinking_parts.append(delta["reasoning_content_thinking"])
+                        # Capture tool_calls
+                        if "tool_calls" in delta and delta["tool_calls"]:
+                            for tc in delta["tool_calls"]:
+                                if isinstance(tc, dict):
+                                    tool_calls.append(tc)
+                        # Capture finish_reason
+                        if choices[0].get("finish_reason"):
+                            finish_reason = choices[0]["finish_reason"]
                 # Debug: log any SSE event that has usage or cache-related keys (set LOG_LEVEL=DEBUG to see)
                 if "usage" in obj or "prompt_tokens" in obj or "input_tokens" in obj or "cached_tokens" in str(obj) or "cache_creation" in str(obj):
                     logger.debug(
@@ -194,7 +218,11 @@ def _parse_openai_stream_chunks(chunks: list[bytes]) -> dict:
                 inner = (obj.get("usage") or {}) if isinstance(obj.get("usage"), dict) else {}
                 if inner.get("usage_details") or inner.get("input_tokens") is not None or inner.get("output_tokens") is not None:
                     usage.update(_normalize_usage(inner))
+
     content = "".join(content_parts) if content_parts else ""
+    reasoning_content = "".join(reasoning_content_parts) if reasoning_content_parts else None
+    reasoning_content_thinking = "".join(reasoning_content_thinking_parts) if reasoning_content_thinking_parts else None
+
     usage_final = _normalize_usage(usage) if usage else {}
     logger.debug(
         "stream_reconstructed_usage",
@@ -203,13 +231,202 @@ def _parse_openai_stream_chunks(chunks: list[bytes]) -> dict:
     )
     if not usage_final:
         usage_final = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+
+    # Build message with all captured fields
+    message = {"role": "assistant", "content": content}
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
+    if reasoning_content_thinking is not None:
+        message["reasoning_content_thinking"] = reasoning_content_thinking
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
     return {
         "id": response_id,
         "model": model,
         "object": "chat.completion",
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage_final,
     }
+
+
+def _convert_anthropic_to_openai_format(response: dict) -> dict:
+    """Convert Anthropic/DashScope Anthropic response to OpenAI-compatible format.
+
+    Anthropic format:
+    {
+        "id": "msg_xxx",
+        "model": "glm-5",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "...", "signature": "..."},
+            {"type": "text", "text": "..."}
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 20},
+        "stop_reason": "end_turn"
+    }
+
+    OpenAI format:
+    {
+        "id": "chatcmpl_xxx",
+        "model": "glm-5",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "...",
+                "reasoning_content": "..."  // if thinking present
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+    }
+    """
+    # Extract content parts
+    content_text = ""
+    reasoning_content = ""
+    content_array = response.get("content", [])
+
+    if isinstance(content_array, list):
+        for item in content_array:
+            if isinstance(item, dict):
+                content_type = item.get("type", "")
+                if content_type == "text":
+                    content_text += item.get("text", "")
+                elif content_type == "thinking":
+                    reasoning_content += item.get("thinking", "")
+    elif isinstance(content_array, str):
+        content_text = content_array
+
+    # Build OpenAI format response
+    input_tokens = response.get("usage", {}).get("input_tokens", 0) or response.get("usage", {}).get("prompt_tokens", 0)
+    output_tokens = response.get("usage", {}).get("output_tokens", 0) or response.get("usage", {}).get("completion_tokens", 0)
+
+    result = {
+        "id": response.get("id", ""),
+        "model": response.get("model", ""),
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content_text,
+            },
+            "finish_reason": response.get("stop_reason", "stop")
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+    # Add reasoning_content if present
+    if reasoning_content:
+        result["choices"][0]["message"]["reasoning_content"] = reasoning_content
+
+    return result
+
+
+def _parse_anthropic_stream_chunks(chunks: list[bytes]) -> dict:
+    """Parse Anthropic-style SSE chunks into one response dict.
+
+    Anthropic SSE format:
+    event: content_block_delta
+    data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+
+    event: message_delta
+    data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}}
+    """
+    if not chunks:
+        return {"stream": True}
+    try:
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+    except Exception:
+        return {"stream": True}
+    content_parts = []
+    reasoning_content_parts = []
+    usage = {}
+    response_id = None
+    model = None
+    stop_reason = None
+
+    # Parse SSE format: event: and data: are on separate lines
+    lines = raw.split("\n")
+    current_event = None
+    current_data = None
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            payload = line[5:].strip()
+            if payload == "[DONE]" or payload == "":
+                continue
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+
+            response_id = response_id or obj.get("id") or obj.get("message", {}).get("id")
+            model = model or obj.get("model") or obj.get("message", {}).get("model")
+
+            # Use event type from event: line or data type from object
+            event_type = obj.get("type", current_event or "")
+
+            if event_type == "content_block_delta":
+                delta = obj.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    content_parts.append(delta.get("text", ""))
+                elif delta.get("type") == "thinking_delta":
+                    reasoning_content_parts.append(delta.get("thinking", ""))
+            elif event_type == "message_delta":
+                stop_reason = obj.get("delta", {}).get("stop_reason")
+                if "usage" in obj:
+                    usage.update(obj["usage"])
+            elif event_type == "message_start":
+                usage.update(obj.get("message", {}).get("usage", {}))
+
+            current_event = None  # Reset event after processing
+
+    content = "".join(content_parts) if content_parts else ""
+    reasoning_content = "".join(reasoning_content_parts) if reasoning_content_parts else None
+
+    # Anthropic usage format
+    prompt_tokens = usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("output_tokens", 0) or usage.get("completion_tokens", 0)
+    total_tokens = prompt_tokens + completion_tokens
+
+    # Build OpenAI format response
+    result = {
+        "id": response_id,
+        "model": model,
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": stop_reason or "stop"
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
+    }
+
+    if reasoning_content:
+        result["choices"][0]["message"]["reasoning_content"] = reasoning_content
+
+    return result
 
 
 async def create_stream_request_log_async(
@@ -261,13 +478,19 @@ async def update_stream_response_async(
     request_log_id: str,
     chunks: list[bytes],
     end_time: datetime,
+    provider: str = "openai",
 ):
     """Update an existing stream request log with reconstructed response from chunks."""
     from src.models.database import AsyncSessionLocal
     from sqlalchemy import select
     from src.models.request_log import RequestLog
 
-    response_body = _parse_openai_stream_chunks(chunks)
+    # Parse chunks based on provider format
+    if provider in ("anthropic", "dashscope_anthropic"):
+        response_body = _parse_anthropic_stream_chunks(chunks)
+    else:
+        response_body = _parse_openai_stream_chunks(chunks)
+
     # Debug: full reconstructed response body for stream (set LOG_LEVEL=DEBUG); focus on usage / cache
     usage_debug = response_body.get("usage") if isinstance(response_body, dict) else None
     logger.debug(
@@ -309,7 +532,7 @@ async def update_stream_response_async(
             await session.commit()
         except Exception as e:
             await session.rollback()
-            logger.error("Update stream response failed: %s", e)
+            logger.error("Update stream response failed: %s", e, exc_info=True)
 
 
 async def record_response_async(
@@ -447,7 +670,20 @@ async def proxy_request(
         base_url = PROVIDER_BASE_URLS.get(auth.provider_type)
         if not base_url:
             base_url = f"https://api.{auth.provider_type}.com/v1"
-    target_url = f"{base_url}/{path}"
+
+    # Path mapping for different providers
+    # OpenAI format: /v1/chat/completions
+    # Anthropic format: /v1/messages
+    # Only convert for explicit Anthropic endpoints (URLs containing /anthropic path)
+    target_path = path
+    is_anthropic_format = (
+        auth.provider_type in ("anthropic", "dashscope_anthropic") or
+        (auth.base_url and "/anthropic" in auth.base_url.lower())
+    )
+    if is_anthropic_format and path == "chat/completions":
+        target_path = "v1/messages"
+
+    target_url = f"{base_url}/{target_path}"
     try:
         target_host = urlparse(target_url).netloc or target_url
     except Exception:
@@ -475,7 +711,10 @@ async def proxy_request(
     # Ensure JSON when we stream body as chunks (content= generator does not set Content-Type)
     if has_body and "content-type" not in {k.lower() for k in headers}:
         headers["Content-Type"] = "application/json"
-    if auth.provider_type == "anthropic":
+
+    # Set headers based on provider format (not just provider type)
+    # Only use Anthropic headers for explicit Anthropic endpoints
+    if auth.provider_type == "anthropic" or (auth.base_url and "/anthropic" in auth.base_url.lower()):
         headers["x-api-key"] = auth.provider_key
         headers["anthropic-version"] = "2023-06-01"
     else:
@@ -541,8 +780,14 @@ async def proxy_request(
                     await queue.put(("done",))
                     rid = stream_log_id_ref.get("id")
                     if rid and chunks_collector:
+                        # Determine if Anthropic format based on provider type or explicit Anthropic URL path
+                        is_anthropic_format = (
+                            auth.provider_type in ("anthropic", "dashscope_anthropic") or
+                            (auth.base_url and "/anthropic" in auth.base_url.lower())
+                        )
+                        parser_provider = "anthropic" if is_anthropic_format else auth.provider_type
                         asyncio.create_task(
-                            update_stream_response_async(rid, list(chunks_collector), datetime.now())
+                            update_stream_response_async(rid, list(chunks_collector), datetime.now(), parser_provider)
                         )
 
             async def stream_from_queue():
@@ -624,6 +869,14 @@ async def proxy_request(
         try:
             if (provider_response.headers.get("content-type") or "").startswith("application/json"):
                 response_body_for_log = json.loads(response_content)
+                # Convert Anthropic/DashScope format to OpenAI format for consistent logging
+                # Only convert for explicit Anthropic endpoints (URLs containing /anthropic path)
+                is_anthropic_format = (
+                    auth.provider_type in ("anthropic", "dashscope_anthropic") or
+                    (auth.base_url and "/anthropic" in auth.base_url.lower())
+                )
+                if is_anthropic_format and (response_body_for_log.get("type") == "message" or isinstance(response_body_for_log.get("content"), list)):
+                    response_body_for_log = _convert_anthropic_to_openai_format(response_body_for_log)
         except Exception:
             pass
 

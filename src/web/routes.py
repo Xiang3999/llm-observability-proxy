@@ -1,6 +1,7 @@
 """Web Dashboard routes."""
 
-from typing import Annotated, Optional
+import re
+from typing import Annotated, Optional, List, Dict
 from fastapi import APIRouter, Request, Depends, HTTPException, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,121 @@ router = APIRouter(tags=["Web"])
 
 # Type alias for database session dependency
 DbSession = Annotated[AsyncSession, Depends(get_db)]
+
+
+def extract_cron_task_info(request_body: Optional[dict]) -> Optional[str]:
+    """Extract cron task_id from request body messages.
+
+    Cron messages have format: [cron:task_id Task Name] at the START of user message content.
+    Returns the task_id if found, None otherwise.
+    """
+    if not request_body:
+        return None
+
+    messages = request_body.get("messages", [])
+    for msg in messages:
+        # Only look for user messages
+        if msg.get("role") != "user":
+            continue
+
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            # Match pattern at the START of content: [cron:task_id Task Name]
+            match = re.search(r'^\[cron:([a-f0-9-]+)\s+[^\]]+\]', content, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        # Also handle array format content (like [{type: "text", text: "..."}])
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    match = re.search(r'^\[cron:([a-f0-9-]+)\s+[^\]]+\]', text, re.IGNORECASE)
+                    if match:
+                        return match.group(1)
+    return None
+
+
+def get_cache_read_info(request_log: RequestLog) -> str:
+    """Get cache read tokens display string."""
+    cache_read = request_log.cache_read_tokens
+    if cache_read and cache_read > 0:
+        return f"{cache_read:,}"
+    return "-"
+
+
+def get_prompt_hash(content: str) -> str:
+    """Generate short hash for prompt identification."""
+    import hashlib
+    return hashlib.md5(content.encode()).hexdigest()[:12]
+
+
+def extract_system_prompts(requests: List[RequestLog]) -> dict:
+    """
+    Extract system prompts from requests and aggregate.
+    Returns: {prompt_hash: {"content": str, "count": int, "first_seen": datetime,
+                           "last_seen": datetime, "daily_counts": Dict[str, int],
+                           "model_counts": Dict[str, int], "requests": List[RequestLog]}}
+    """
+    result = {}
+
+    for req in requests:
+        request_body = req.request_body or {}
+        messages = request_body.get("messages", [])
+
+        for msg in messages:
+            if msg.get("role") == "system" and msg.get("content"):
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Handle array format content
+                    content = " ".join(
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+
+                prompt_hash = get_prompt_hash(content)
+
+                if prompt_hash not in result:
+                    result[prompt_hash] = {
+                        "content": content,
+                        "count": 0,
+                        "first_seen": req.created_at,
+                        "last_seen": req.created_at,
+                        "daily_counts": {},
+                        "model_counts": {},
+                        "requests": []
+                    }
+
+                result[prompt_hash]["count"] += 1
+                result[prompt_hash]["requests"].append(req)
+
+                # Update first/last seen
+                if req.created_at < result[prompt_hash]["first_seen"]:
+                    result[prompt_hash]["first_seen"] = req.created_at
+                if req.created_at > result[prompt_hash]["last_seen"]:
+                    result[prompt_hash]["last_seen"] = req.created_at
+
+                # Daily counts
+                date_str = req.created_at.strftime("%Y-%m-%d")
+                result[prompt_hash]["daily_counts"][date_str] = \
+                    result[prompt_hash]["daily_counts"].get(date_str, 0) + 1
+
+                # Model counts
+                model = req.model or "unknown"
+                result[prompt_hash]["model_counts"][model] = \
+                    result[prompt_hash]["model_counts"].get(model, 0) + 1
+
+                break  # Only count first system prompt per request
+
+    return result
+
+
+def calculate_daily_distribution(requests: List[RequestLog]) -> Dict[str, int]:
+    """Calculate requests per day."""
+    daily = {}
+    for req in requests:
+        date_str = req.created_at.strftime("%Y-%m-%d")
+        daily[date_str] = daily.get(date_str, 0) + 1
+    return daily
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
@@ -115,6 +231,9 @@ async def dashboard(
 
     def _recent_req_row(req):
         status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
+        cache_display = get_cache_read_info(req)
+        cron_task_id = extract_cron_task_info(req.request_body)
+        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}"</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
         return (
             f'<tr><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.created_at.strftime("%Y-%m-%d %H:%M:%S")}</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
@@ -123,6 +242,8 @@ async def dashboard(
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_latency_ms or "-"}ms</td>'
             f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{req.status_code or "N/A"}</span></td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${float(req.cost_usd or 0):.4f}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cache_display}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm">{cron_display}</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium"><a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a></td></tr>'
         )
     recent_requests_rows = "".join(_recent_req_row(req) for req in recent_requests)
@@ -263,11 +384,13 @@ async def dashboard(
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
                             <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
-                        {recent_requests_rows if recent_requests_rows else '<tr><td colspan="8" class="px-6 py-4 text-center text-gray-500">No requests yet</td></tr>'}
+                        {recent_requests_rows if recent_requests_rows else '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">No requests yet</td></tr>'}
                     </tbody>
                 </table>
             </div>
@@ -383,7 +506,8 @@ async def list_requests(
     page: int = 1,
     app_id: Optional[str] = None,
     model: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    cron_task: Optional[str] = None
 ):
     """List all requests with pagination and filters."""
     from sqlalchemy import select, func
@@ -436,6 +560,9 @@ async def list_requests(
 
     def _req_row(req):
         status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
+        cron_task_id = extract_cron_task_info(req.request_body)
+        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
+        cache_display = get_cache_read_info(req)
         return (
             f'<tr><td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.created_at.strftime("%Y-%m-%d %H:%M:%S")}</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
@@ -444,10 +571,12 @@ async def list_requests(
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{req.total_latency_ms or "-"}ms</td>'
             f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{req.status_code or "N/A"}</span></td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${float(req.cost_usd or 0):.4f}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{cache_display}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm">{cron_display}</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium"><a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a></td></tr>'
         )
     request_rows = "".join(_req_row(req) for req in requests_list)
-    empty_req_msg = '<tr><td colspan="8" class="px-6 py-4 text-center text-gray-500">No requests found</td></tr>' if not requests_list else ""
+    empty_req_msg = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">No requests found</td></tr>' if not requests_list else ""
 
     prev_q = "&".join([f"app_id={app_id}" if app_id else "", f"model={model}" if model else "", f"status={status}" if status else ""])
     prev_q = "&" + prev_q.strip("&") if prev_q.strip() else ""
@@ -500,6 +629,12 @@ async def list_requests(
                             <option value="500" {"selected" if status == "500" else ""}>500 Server Error</option>
                         </select>
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Cron Task</label>
+                        <input type="text" name="cron_task" value="{cron_task or ''}" placeholder="Task ID or name"
+                               class="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                               title="Filter by cron task ID">
+                    </div>
                     <div class="flex items-end">
                         <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
                             <i class="fas fa-filter mr-2"></i>Filter
@@ -523,6 +658,8 @@ async def list_requests(
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
                             <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                         </tr>
                     </thead>
@@ -973,7 +1110,9 @@ async def view_application_analytics(
     app_id: str,
     db: DbSession,
     days: int = 7,
-    limit: int = 100
+    limit: int = 100,
+    is_cron_task: Optional[str] = None,
+    cron_task: Optional[str] = None,
 ):
     """View detailed application analytics with prompt analysis and full request history."""
     from sqlalchemy import select, func
@@ -1001,13 +1140,50 @@ async def view_application_analytics(
     else:
         cutoff_date = now - timedelta(days=days)
 
-    requests_result = await db.execute(
+    # Build query with filters
+    query = (
         select(RequestLog)
         .where(RequestLog.proxy_key_id == app_id)
         .where(RequestLog.created_at >= cutoff_date)
         .order_by(RequestLog.created_at.desc())
     )
+
+    # Cron task filter
+    if is_cron_task == "yes":
+        # Will filter in Python after fetching - need to check request body
+        pass  # Fetch all, filter below
+    elif is_cron_task == "no":
+        pass  # Fetch all, filter below
+
+    if cron_task:
+        # Filter by specific cron task ID - will filter in Python
+        pass  # Fetch all, filter below
+
+    requests_result = await db.execute(query)
     all_requests = list(requests_result.scalars().all())
+
+    # Apply cron task filters in Python (need to parse request body)
+    if is_cron_task == "yes" or cron_task:
+        filtered_requests = []
+        for req in all_requests:
+            task_id = extract_cron_task_info(req.request_body)
+            if is_cron_task == "yes" and is_cron_task == "no":
+                continue  # Both yes and no = no filter
+            elif is_cron_task == "yes" and task_id is None:
+                continue  # Only want cron tasks, this one has none
+            elif is_cron_task == "no" and task_id is not None:
+                continue  # Only want non-cron tasks, this one has task
+            elif cron_task and task_id != cron_task:
+                continue  # Specific task filter
+            filtered_requests.append(req)
+        all_requests = filtered_requests if filtered_requests else all_requests
+
+    # Re-apply time filter for cron task filtered results
+    if days == 0:
+        cutoff_date = now - timedelta(days=365*10)
+    else:
+        cutoff_date = now - timedelta(days=days)
+    all_requests = [r for r in all_requests if r.created_at >= cutoff_date]
 
     # Limit analysis to last 100 requests for performance
     analysis_limit = limit  # Store for display
@@ -1031,7 +1207,8 @@ async def view_application_analytics(
     # Prompt Analysis - analyze message roles (limited to last 100)
     role_counts = {"system": 0, "user": 0, "assistant": 0, "tool": 0}
     tool_call_count = 0
-    system_prompts = set()
+    # system_prompts: dict mapping prompt content -> {"count": int, "last_seen": datetime}
+    system_prompts = {}
     user_prompt_lengths = []
     messages_per_request = []
     tokens_per_request = []
@@ -1047,11 +1224,16 @@ async def view_application_analytics(
             if role in role_counts:
                 role_counts[role] += 1
 
-            # Extract system prompts
+            # Extract system prompts - track count and last seen time
             if role == "system" and msg.get("content"):
                 content = msg.get("content", "")
                 if isinstance(content, str):
-                    system_prompts.add(content[:200])  # First 200 chars
+                    if content not in system_prompts:
+                        system_prompts[content] = {"count": 0, "last_seen": req.created_at}
+                    system_prompts[content]["count"] += 1
+                    # Update last_seen to the most recent
+                    if req.created_at > system_prompts[content]["last_seen"]:
+                        system_prompts[content]["last_seen"] = req.created_at
 
             # User message length analysis
             if role == "user" and msg.get("content"):
@@ -1083,6 +1265,38 @@ async def view_application_analytics(
     avg_user_prompt_length = sum(user_prompt_lengths) / len(user_prompt_lengths) if user_prompt_lengths else 0
     avg_tokens_per_request = sum(tokens_per_request) / len(tokens_per_request) if tokens_per_request else 0
 
+    # Cache Efficiency Analysis
+    total_input_tokens = sum(r.prompt_tokens or 0 for r in all_requests)
+    total_cache_read_tokens = sum(r.cache_read_tokens or 0 for r in all_requests)
+    cache_hit_requests = sum(1 for r in all_requests if r.cache_read_tokens and r.cache_read_tokens > 0)
+    cache_hit_rate = (cache_hit_requests / total_requests * 100) if total_requests > 0 else 0
+    cache_token_hit_rate = (total_cache_read_tokens / total_input_tokens * 100) if total_input_tokens > 0 else 0
+
+    # Cron Task analysis - collect all unique task IDs and names
+    cron_tasks = {}  # {task_id: {"name": str, "count": int, "cache_hits": int}}
+    for req in all_requests:
+        task_id = extract_cron_task_info(req.request_body)
+        if task_id:
+            if task_id not in cron_tasks:
+                # Extract task name from first request
+                request_body = req.request_body or {}
+                messages = request_body.get("messages", [])
+                task_name = ""
+                for msg in messages:
+                    if msg.get("role") == "user":
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            match = re.search(r'^\[cron:([a-f0-9-]+)\s+([^\]]+)\]', content, re.IGNORECASE)
+                            if match:
+                                task_name = match.group(2)
+                                break
+                cron_tasks[task_id] = {"name": task_name, "count": 0, "cache_hits": 0, "input_tokens": 0, "cache_read_tokens": 0}
+            cron_tasks[task_id]["count"] += 1
+            if req.cache_read_tokens and req.cache_read_tokens > 0:
+                cron_tasks[task_id]["cache_hits"] += 1
+            cron_tasks[task_id]["input_tokens"] += req.prompt_tokens or 0
+            cron_tasks[task_id]["cache_read_tokens"] += req.cache_read_tokens or 0
+
     # Model usage distribution
     model_counts = {}
     for r in all_requests:
@@ -1104,11 +1318,63 @@ async def view_application_analytics(
         daily_tokens[date_str] = daily_tokens.get(date_str, 0) + (r.total_tokens or 0)
     sorted_dates = sorted(daily_counts.keys())
 
-    system_prompts_html = "".join([
-        f'<div class="text-xs bg-gray-50 p-2 rounded border border-gray-200 truncate" title="{sp}"><i class="fas fa-quote-left text-gray-400 mr-1"></i>{sp[:100]}...</div>'
-        for sp in list(system_prompts)[:5]
-    ])
-    system_prompts_msg = '<p class="text-sm text-gray-500">No system prompts found</p>' if not system_prompts else ""
+    # Build system prompts list for modal display
+    # Sort by count descending, then by last_seen descending
+    import html as html_lib
+    system_prompts_sorted = sorted(
+        system_prompts.items(),
+        key=lambda x: (x[1]["count"], x[1]["last_seen"]),
+        reverse=True
+    )[:10]  # Top 10 by count
+
+    system_prompts_html = ""
+    for idx, (sp, info) in enumerate(system_prompts_sorted):
+        prompt_id = f"sys-prompt-{idx}"
+        preview = sp[:80] + "..." if len(sp) > 80 else sp
+        escaped_sp = html_lib.escape(sp)
+        preview_escaped = html_lib.escape(preview)
+        count = info["count"]
+        last_seen = info["last_seen"].strftime("%m-%d %H:%M") if info["last_seen"] else "N/A"
+        system_prompts_html += f'''
+            <div class="text-xs bg-gray-50 p-2 rounded border border-gray-200 mb-2">
+                <div class="flex justify-between items-center mb-2">
+                    <div class="flex items-center gap-2">
+                        <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-semibold">{count}次</span>
+                        <span class="text-gray-500">最近：{last_seen}</span>
+                    </div>
+                    <button onclick="document.getElementById('modal-{prompt_id}').classList.remove('hidden')"
+                            class="px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 flex-shrink-0">
+                        <i class="fas fa-eye mr-1"></i>查看
+                    </button>
+                </div>
+                <div class="truncate text-gray-600">
+                    <i class="fas fa-quote-left text-gray-400 mr-1"></i>{preview_escaped}
+                </div>
+            </div>
+            <div id="modal-{prompt_id}" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onclick="this.classList.add('hidden')">
+                <div class="bg-white rounded-lg shadow-xl max-w-2xl max-h-[80vh] overflow-auto m-4" onclick="event.stopPropagation()">
+                    <div class="p-4 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white">
+                        <h3 class="text-lg font-semibold text-gray-800"><i class="fas fa-file-code text-purple-500 mr-2"></i>System Prompt #{idx + 1}</h3>
+                        <button onclick="document.getElementById('modal-{prompt_id}').classList.add('hidden')" class="text-gray-400 hover:text-gray-600">
+                            <i class="fas fa-times text-xl"></i>
+                        </button>
+                    </div>
+                    <div class="p-4">
+                        <div class="mb-3 flex gap-4 text-sm">
+                            <span class="text-gray-600"><i class="fas fa-chart-bar text-blue-500 mr-1"></i>出现次数：<strong class="text-gray-900">{count}</strong></span>
+                            <span class="text-gray-600"><i class="fas fa-clock text-green-500 mr-1"></i>最近出现：<strong class="text-gray-900">{last_seen}</strong></span>
+                        </div>
+                        <pre class="whitespace-pre-wrap text-sm text-gray-700 bg-gray-50 p-4 rounded border border-gray-200 overflow-x-auto">{escaped_sp}</pre>
+                    </div>
+                    <div class="p-4 border-t border-gray-200 bg-gray-50 flex justify-between items-center">
+                        <span class="text-xs text-gray-500">{len(sp)} characters</span>
+                        <span class="text-xs text-gray-500">唯一 ID: {idx + 1}</span>
+                    </div>
+                </div>
+            </div>
+        '''
+    if not system_prompts_html:
+        system_prompts_html = '<p class="text-sm text-gray-500">No system prompts found</p>'
     tool_names_html = "".join([
         f'<span class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm"><i class="fas fa-wrench mr-1"></i>{name} ({count})</span>'
         for name, count in sorted(tool_names.items(), key=lambda x: -x[1])[:10]
@@ -1131,6 +1397,9 @@ async def view_application_analytics(
     def _analytics_req_row(req):
         status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
         n_msg = len(req.request_body.get("messages", [])) if req.request_body else 0
+        cron_task_id = extract_cron_task_info(req.request_body)
+        cron_display = f'<span class="text-xs font-mono text-blue-600" title="Cron Task">{cron_task_id[:8] if cron_task_id else "-"}"</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
+        cache_display = get_cache_read_info(req)
         return (
             f'<tr class="hover:bg-gray-50"><td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.created_at.strftime("%m-%d %H:%M")}</td>'
             f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
@@ -1138,10 +1407,12 @@ async def view_application_analytics(
             f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
             f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
             f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
             f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium"><a href="/requests/{req.id}?from_app={app_id}" class="text-blue-600 hover:text-blue-900">View</a></td></tr>'
         )
     request_history_rows = "".join(_analytics_req_row(req) for req in all_requests)
-    request_history_empty = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-500">No requests found</td></tr>' if not all_requests else ""
+    request_history_empty = '<tr><td colspan="9" class="px-4 py-4 text-center text-gray-500">No requests found</td></tr>' if not all_requests else ""
 
     app_tabs = render_app_tabs(app_id, proxy_key.name, "analytics")
     breadcrumbs = render_breadcrumbs([
@@ -1224,6 +1495,91 @@ async def view_application_analytics(
                 </div>
             </div>
 
+            <!-- Cache Efficiency Analysis -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">
+                    <i class="fas fa-bolt text-yellow-500 mr-2"></i>Cache Efficiency Analysis
+                </h2>
+
+                <!-- Cache Stats Summary -->
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                    <div class="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-4 border border-blue-200">
+                        <div class="text-xs text-blue-600 font-medium">Total Input Tokens</div>
+                        <div class="text-2xl font-bold text-blue-900 mt-1">{total_input_tokens:,}</div>
+                    </div>
+                    <div class="bg-gradient-to-br from-green-50 to-green-100 rounded-lg p-4 border border-green-200">
+                        <div class="text-xs text-green-600 font-medium">Cache Read Tokens</div>
+                        <div class="text-2xl font-bold text-green-900 mt-1">{total_cache_read_tokens:,}</div>
+                    </div>
+                    <div class="bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg p-4 border border-purple-200">
+                        <div class="text-xs text-purple-600 font-medium">Cache Token Hit Rate</div>
+                        <div class="text-2xl font-bold text-purple-900 mt-1">{cache_token_hit_rate:.1f}%</div>
+                    </div>
+                    <div class="bg-gradient-to-br from-orange-50 to-orange-100 rounded-lg p-4 border border-orange-200">
+                        <div class="text-xs text-orange-600 font-medium">Cache Hit Requests</div>
+                        <div class="text-2xl font-bold text-orange-900 mt-1">{cache_hit_requests:,}</div>
+                    </div>
+                    <div class="bg-gradient-to-br from-pink-50 to-pink-100 rounded-lg p-4 border border-pink-200">
+                        <div class="text-xs text-pink-600 font-medium">Request Cache Hit Rate</div>
+                        <div class="text-2xl font-bold text-pink-900 mt-1">{cache_hit_rate:.1f}%</div>
+                    </div>
+                </div>
+
+                <!-- Cron Task Filter -->
+                <div class="border-t border-gray-200 pt-4">
+                    <form method="GET" class="flex flex-wrap items-end gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">
+                                <i class="fas fa-robot mr-1"></i>Is Cron Task
+                            </label>
+                            <select name="is_cron_task" onchange="this.form.submit()" class="px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500">
+                                <option value="">All</option>
+                                <option value="yes" {'selected' if is_cron_task == 'yes' else ''}>Yes (Cron Tasks)</option>
+                                <option value="no" {'selected' if is_cron_task == 'no' else ''}>No (Regular)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">
+                                <i class="fas fa-tasks mr-1"></i>Select Cron Task
+                            </label>
+                            <select name="cron_task" onchange="this.form.submit()" class="px-3 py-2 border border-gray-300 rounded-md text-sm min-w-[250px] focus:ring-blue-500 focus:border-blue-500">
+                                <option value="">All Tasks</option>
+                                {"".join(f'<option value="{tid}" {"selected" if cron_task == tid else ""}>{tinfo["name"]} ({tid[:8]}...) - {tinfo["count"]} reqs</option>' for tid, tinfo in sorted(cron_tasks.items(), key=lambda x: -x[1]["count"]))}
+                            </select>
+                        </div>
+                        <div class="flex-1">
+                            <a href="/applications/{app_id}/analytics?days={days}&limit={limit}" class="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-md text-sm hover:bg-gray-200">
+                                <i class="fas fa-times mr-2"></i>Clear Filters
+                            </a>
+                        </div>
+                    </form>
+                </div>
+
+                <!-- Cron Task Details Table -->
+                {"".join(f'''
+                <div class="mt-4">
+                    <h4 class="text-sm font-medium text-gray-700 mb-2">Cron Task: {tinfo["name"]} ({tid[:8]}...)</h4>
+                    <div class="grid grid-cols-4 gap-3">
+                        <div class="bg-gray-50 rounded p-2 text-center">
+                            <div class="text-xs text-gray-500">Requests</div>
+                            <div class="font-semibold text-gray-900">{tinfo["count"]}</div>
+                        </div>
+                        <div class="bg-blue-50 rounded p-2 text-center">
+                            <div class="text-xs text-blue-600">Input Tokens</div>
+                            <div class="font-semibold text-blue-900">{tinfo["input_tokens"]:,}</div>
+                        </div>
+                        <div class="bg-green-50 rounded p-2 text-center">
+                            <div class="text-xs text-green-600">Cache Read Tokens</div>
+                            <div class="font-semibold text-green-900">{tinfo["cache_read_tokens"]:,}</div>
+                        </div>
+                        <div class="bg-purple-50 rounded p-2 text-center">
+                            <div class="text-xs text-purple-600">Cache Hit Rate</div>
+                            <div class="font-semibold text-purple-900">{(tinfo["cache_read_tokens"]/tinfo["input_tokens"]*100) if tinfo["input_tokens"] > 0 else 0:.1f}%</div>
+                        </div>
+                    </div>
+                </div>''' for tid, tinfo in sorted(cron_tasks.items(), key=lambda x: -x[1]["count"])[:5]) if cron_tasks else '<p class="text-sm text-gray-500 text-center py-4">No cron tasks found</p>'}
+            </div>
+
             <!-- Prompt Analysis Section -->
             <div class="bg-white rounded-lg shadow p-6 mb-6">
                 <h2 class="text-lg font-semibold text-gray-800 mb-4">
@@ -1279,9 +1635,16 @@ async def view_application_analytics(
 
                     <!-- System Prompts -->
                     <div class="lg:col-span-2">
-                        <h3 class="text-sm font-medium text-gray-700 mb-3">System Prompts ({len(system_prompts)} unique)</h3>
+                        <div class="flex justify-between items-center mb-3">
+                            <h3 class="text-sm font-medium text-gray-700">
+                                System Prompts ({len(system_prompts)} unique, {sum(info['count'] for info in system_prompts.values())} total)
+                            </h3>
+                            <a href="/system-prompts" class="text-xs text-blue-600 hover:text-blue-800">
+                                <i class="fas fa-external-link-alt mr-1"></i>Full Analysis
+                            </a>
+                        </div>
                         <div class="space-y-2 max-h-40 overflow-y-auto">
-                            {system_prompts_html if system_prompts_html else system_prompts_msg}
+                            {system_prompts_html}
                         </div>
                     </div>
                 </div>
@@ -1356,6 +1719,8 @@ async def view_application_analytics(
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
                                 <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                             </tr>
                         </thead>
@@ -1373,7 +1738,7 @@ async def view_application_analytics(
             "labels": sorted_dates,
             "datasets": [
                 {"label": "Requests", "data": [daily_counts[d] for d in sorted_dates], "borderColor": "rgb(59, 130, 246)", "backgroundColor": "rgba(59, 130, 246, 0.1)", "fill": True, "tension": 0.4, "yAxisID": "y"},
-                {"label": "Tokens (÷100)", "data": [daily_tokens[d] // 100 for d in sorted_dates], "borderColor": "rgb(34, 197, 94)", "backgroundColor": "rgba(34, 197, 94, 0.1)", "fill": True, "tension": 0.4, "yAxisID": "y1"},
+                {"label": "Tokens (K)", "data": [round(daily_tokens[d] / 1000, 1) for d in sorted_dates], "borderColor": "rgb(34, 197, 94)", "backgroundColor": "rgba(34, 197, 94, 0.1)", "fill": True, "tension": 0.4, "yAxisID": "y1"},
             ],
         },
         "options": {
@@ -1383,7 +1748,7 @@ async def view_application_analytics(
             "scales": {
                 "x": {"grid": {"display": False}},
                 "y": {"type": "linear", "display": True, "position": "left", "beginAtZero": True, "ticks": {"stepSize": 1}, "title": {"display": True, "text": "Requests"}},
-                "y1": {"type": "linear", "display": True, "position": "right", "beginAtZero": True, "grid": {"drawOnChartArea": False}, "title": {"display": True, "text": "Tokens (÷100)"}},
+                "y1": {"type": "linear", "display": True, "position": "right", "beginAtZero": True, "grid": {"drawOnChartArea": False}, "title": {"display": True, "text": "Tokens (K)"}},
             },
         },
     }
@@ -1652,5 +2017,911 @@ async def view_application_detail(app_id: str, db: DbSession):
         main_content,
         extra_head='<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>',
         app_tabs_html=app_tabs,
+    )
+    return html
+
+
+# =============================================================================
+# System Prompts Analysis Routes
+# =============================================================================
+
+@router.get("/system-prompts", response_class=HTMLResponse)
+async def list_system_prompts(
+    request: Request,
+    db: DbSession,
+    app_id: Optional[str] = None,
+    model: Optional[str] = None,
+    status: Optional[str] = None,
+    cron_task: Optional[str] = None,
+    days: int = 7,
+    limit: int = 100,
+    page: int = 1,
+):
+    """List all system prompts with aggregation and filters."""
+    from sqlalchemy import select, func
+    import html as html_lib
+
+    per_page = 50
+    offset = (page - 1) * per_page
+
+    # Build base query with filters
+    query = select(RequestLog).order_by(RequestLog.created_at.desc())
+
+    if app_id:
+        query = query.where(RequestLog.proxy_key_id == app_id)
+    if model:
+        query = query.where(RequestLog.model == model)
+    if status:
+        query = query.where(RequestLog.status_code == int(status))
+
+    # Time range filter
+    now = datetime.now()
+    if days > 0:
+        cutoff = now - timedelta(days=days)
+        query = query.where(RequestLog.created_at >= cutoff)
+
+    # Get all requests for processing (no limit at query level for accurate aggregation)
+    result = await db.execute(query)
+    all_requests = list(result.scalars().all())
+
+    # Apply cron task filter if specified (in Python since it's in JSON body)
+    if cron_task:
+        filtered_requests = []
+        for req in all_requests:
+            task_id = extract_cron_task_info(req.request_body)
+            if task_id and (cron_task.lower() in task_id.lower() or cron_task.lower() in str(req.request_body).lower()):
+                filtered_requests.append(req)
+        all_requests = filtered_requests
+
+    # Apply limit for processing
+    analysis_requests = all_requests[:limit]
+
+    # Extract and aggregate system prompts
+    system_prompts = extract_system_prompts(analysis_requests)
+
+    # Calculate totals
+    total_unique_prompts = len(system_prompts)
+    total_requests_with_system = sum(sp["count"] for sp in system_prompts.values())
+
+    # Sort prompts by count descending, then by last_seen descending
+    sorted_prompts = sorted(
+        system_prompts.items(),
+        key=lambda x: (x[1]["count"], x[1]["last_seen"]),
+        reverse=True
+    )
+
+    # Apply pagination
+    total_pages = (total_unique_prompts + per_page - 1) // per_page
+    paginated_prompts = sorted_prompts[offset:offset + per_page]
+
+    # Get proxy key names for display
+    proxy_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+    proxy_names = {pk.id: pk.name for pk in proxy_result.all()}
+
+    # Get unique apps for filter dropdown
+    apps_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+    apps = list(apps_result.all())
+
+    # Get unique models for filter dropdown
+    models_result = await db.execute(select(RequestLog.model).distinct())
+    models = [m[0] for m in models_result.all() if m[0]]
+
+    app_options = "".join([
+        f'<option value="{app.id}" {"selected" if app_id == app.id else ""}>{app.name}</option>'
+        for app in apps
+    ])
+    model_options = "".join([
+        f'<option value="{m}" {"selected" if model == m else ""}>{m}</option>'
+        for m in models
+    ])
+
+    # Build system prompts table rows
+    def _prompt_row(prompt_hash, info, idx):
+        preview = info["content"][:100].replace("\n", " ")
+        preview = preview[:100] + "..." if len(info["content"]) > 100 else preview
+        preview_escaped = html_lib.escape(preview)
+        first_seen = info["first_seen"].strftime("%m-%d %H:%M") if info["first_seen"] else "N/A"
+        last_seen = info["last_seen"].strftime("%m-%d %H:%M") if info["last_seen"] else "N/A"
+
+        # Calculate days ago for last seen
+        days_ago = ""
+        if info["last_seen"]:
+            delta = now - info["last_seen"]
+            if delta.days == 0:
+                days_ago = "Today"
+            elif delta.days == 1:
+                days_ago = "Yesterday"
+            else:
+                days_ago = f"{delta.days} days ago"
+
+        return (
+            f'<tr class="hover:bg-gray-50 cursor-pointer" onclick="window.location.href=\'/system-prompts/{prompt_hash}\'">'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 w-10">'
+            f'<input type="checkbox" name="selected_prompts" value="{prompt_hash}" class="rounded border-gray-300" onclick="event.stopPropagation()">'
+            f'</td>'
+            f'<td class="px-6 py-4">'
+            f'<div class="text-sm text-gray-900 line-clamp-2">{preview_escaped}</div>'
+            f'<div class="text-xs text-gray-500 mt-1 font-mono">{prompt_hash[:8]}...</div>'
+            f'</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600">{info["count"]}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{first_seen}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">'
+            f'<div>{last_seen}</div><div class="text-xs text-gray-400">{days_ago}</div>'
+            f'</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">'
+            f'<a href="/system-prompts/{prompt_hash}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
+            f'</td></tr>'
+        )
+
+    prompt_rows = "".join(_prompt_row(h, info, i) for i, (h, info) in enumerate(paginated_prompts))
+    empty_msg = '<tr><td colspan="6" class="px-6 py-4 text-center text-gray-500">No system prompts found</td></tr>' if not prompt_rows else ""
+
+    # Pagination URLs
+    prev_q = "&".join([
+        f"app_id={app_id}" if app_id else "",
+        f"model={model}" if model else "",
+        f"status={status}" if status else "",
+        f"cron_task={cron_task}" if cron_task else "",
+        f"days={days}" if days else "",
+        f"limit={limit}" if limit else "",
+    ])
+    prev_q = "&" + prev_q.strip("&") if prev_q.strip() else ""
+
+    prev_url = f"/system-prompts?page={max(1, page - 1)}{prev_q}"
+    next_url = f"/system-prompts?page={min(total_pages, page + 1)}{prev_q}"
+    prev_cls = "opacity-50 cursor-not-allowed" if page == 1 else "hover:bg-gray-50"
+    next_cls = "opacity-50 cursor-not-allowed" if page == total_pages else "hover:bg-gray-50"
+
+    pagination_html = (
+        f'<div class="flex justify-center mt-6"><nav class="flex gap-2">'
+        f'<a href="{prev_url}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg {prev_cls}"><i class="fas fa-chevron-left"></i> Previous</a>'
+        f'<span class="px-4 py-2 bg-blue-600 text-white rounded-lg">Page {page} of {total_pages}</span>'
+        f'<a href="{next_url}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg {next_cls}">Next <i class="fas fa-chevron-right"></i></a>'
+        f'</nav></div>'
+    ) if total_pages > 1 else ""
+
+    main_content = f"""
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900">
+                        <i class="fas fa-file-code text-purple-500 mr-2"></i>System Prompts Analysis
+                    </h1>
+                    <p class="text-sm text-gray-500 mt-1">
+                        Analyze and compare system prompts across your requests
+                    </p>
+                </div>
+                <a href="/deep-analytics" class="text-sm text-purple-600 hover:text-purple-800">
+                    <i class="fas fa-flask mr-1"></i>Deep Analytics
+                </a>
+            </div>
+
+            <!-- Summary Stats -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Unique Prompts</div>
+                    <div class="text-xl font-bold text-gray-900">{total_unique_prompts}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Total Requests</div>
+                    <div class="text-xl font-bold text-gray-900">{total_requests_with_system:,}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Avg Requests/Prompt</div>
+                    <div class="text-xl font-bold text-gray-900">{total_requests_with_system / max(1, total_unique_prompts):.1f}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Time Range</div>
+                    <div class="text-xl font-bold text-gray-900">{days if days > 0 else 'All'} days</div>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="bg-white rounded-lg shadow p-4 mb-6">
+                <form method="GET" action="/system-prompts" class="flex flex-wrap gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Application</label>
+                        <select name="app_id" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="">All Applications</option>
+                            {app_options}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                        <select name="model" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="">All Models</option>
+                            {model_options}
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                        <select name="status" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="">All Status</option>
+                            <option value="200" {"selected" if status == "200" else ""}>200 OK</option>
+                            <option value="400" {"selected" if status == "400" else ""}>400 Bad Request</option>
+                            <option value="401" {"selected" if status == "401" else ""}>401 Unauthorized</option>
+                            <option value="429" {"selected" if status == "429" else ""}>429 Too Many Requests</option>
+                            <option value="500" {"selected" if status == "500" else ""}>500 Server Error</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Cron Task</label>
+                        <input type="text" name="cron_task" value="{cron_task or ''}" placeholder="Task ID or name"
+                               class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Time Range</label>
+                        <select name="days" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="1" {"selected" if days == 1 else ""}>Last 24 hours</option>
+                            <option value="3" {"selected" if days == 3 else ""}>Last 3 days</option>
+                            <option value="7" {"selected" if days == 7 else ""}>Last 7 days</option>
+                            <option value="30" {"selected" if days == 30 else ""}>Last 30 days</option>
+                            <option value="90" {"selected" if days == 90 else ""}>Last 90 days</option>
+                            <option value="0" {"selected" if days == 0 else ""}>All time</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Limit</label>
+                        <select name="limit" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="100" {"selected" if limit == 100 else ""}>100 requests</option>
+                            <option value="500" {"selected" if limit == 500 else ""}>500 requests</option>
+                            <option value="1000" {"selected" if limit == 1000 else ""}>1000 requests</option>
+                            <option value="5000" {"selected" if limit == 5000 else ""}>5000 requests</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end gap-2">
+                        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                            <i class="fas fa-filter mr-2"></i>Filter
+                        </button>
+                        <a href="/system-prompts" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+                            <i class="fas fa-times"></i>
+                        </a>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Compare Selected Bar (hidden by default, shown when items selected) -->
+            <div id="compare-bar" class="fixed bottom-0 left-0 right-0 bg-blue-600 text-white p-4 shadow-lg transform translate-y-full transition-transform duration-200 z-40">
+                <div class="max-w-7xl mx-auto flex justify-between items-center">
+                    <span class="text-sm"><span id="selected-count">0</span> prompts selected</span>
+                    <div class="flex gap-2">
+                        <button onclick="clearSelection()" class="px-4 py-2 bg-blue-700 rounded-lg hover:bg-blue-800 text-sm">
+                            <i class="fas fa-times mr-1"></i>Clear
+                        </button>
+                        <button onclick="compareSelected()" class="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-gray-100 text-sm font-semibold">
+                            <i class="fas fa-columns mr-1"></i>Compare Selected
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Prompts Table -->
+            <div class="bg-white rounded-lg shadow">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-10">
+                                <input type="checkbox" id="select-all" class="rounded border-gray-300" onclick="toggleSelectAll(this)">
+                            </th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">System Prompt</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">First Seen</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Seen</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+                        {prompt_rows if prompt_rows else empty_msg}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Pagination -->
+            {pagination_html}
+    """
+
+    breadcrumbs = render_breadcrumbs([
+        ("Dashboard", "/dashboard"),
+        ("System Prompts", None),
+    ])
+    sidebar = render_sidebar("system-prompts")
+
+    extra_head = """<style>
+        .line-clamp-2 {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+    </style>"""
+
+    extra_footer_script = """<script>
+        let selectedCount = 0;
+
+        function toggleSelectAll(checkbox) {
+            const checkboxes = document.querySelectorAll('input[name="selected_prompts"]');
+            checkboxes.forEach(cb => cb.checked = checkbox.checked);
+            updateSelectedCount();
+        }
+
+        function updateSelectedCount() {
+            const checkboxes = document.querySelectorAll('input[name="selected_prompts"]:checked');
+            selectedCount = checkboxes.length;
+            const bar = document.getElementById('compare-bar');
+            document.getElementById('selected-count').textContent = selectedCount;
+            if (selectedCount > 0) {
+                bar.classList.remove('translate-y-full');
+            } else {
+                bar.classList.add('translate-y-full');
+            }
+        }
+
+        function clearSelection() {
+            const checkboxes = document.querySelectorAll('input[name="selected_prompts"]');
+            checkboxes.forEach(cb => cb.checked = false);
+            document.getElementById('select-all').checked = false;
+            updateSelectedCount();
+        }
+
+        function compareSelected() {
+            const checkboxes = document.querySelectorAll('input[name="selected_prompts"]:checked');
+            if (checkboxes.length < 2) {
+                alert('Please select at least 2 prompts to compare');
+                return;
+            }
+            const promptHashes = Array.from(checkboxes).map(cb => cb.value);
+            window.location.href = '/system-prompts/compare?prompts=' + promptHashes.join(',');
+        }
+
+        // Attach change listeners to all checkboxes
+        document.addEventListener('DOMContentLoaded', function() {
+            const checkboxes = document.querySelectorAll('input[name="selected_prompts"]');
+            checkboxes.forEach(cb => cb.addEventListener('change', updateSelectedCount));
+        });
+    </script>"""
+
+    html = render_page(
+        "System Prompts Analysis",
+        sidebar,
+        breadcrumbs,
+        main_content,
+        extra_head=extra_head,
+        extra_footer_script=extra_footer_script,
+    )
+    return html
+
+
+# =============================================================================
+# System Prompts Compare Route (must be before detail route)
+# =============================================================================
+@router.get("/system-prompts/compare", response_class=HTMLResponse)
+async def compare_system_prompts(
+    request: Request,
+    db: DbSession,
+    prompts: str,  # Comma-separated prompt hashes
+    app_id: Optional[str] = None,
+    model: Optional[str] = None,
+    days: int = 7,
+):
+    """Compare multiple system prompts side by side."""
+    import html as html_lib
+    import json
+
+    prompt_hashes = [h.strip() for h in prompts.split(",") if h.strip()]
+
+    if len(prompt_hashes) < 2:
+        raise HTTPException(status_code=400, detail="At least 2 prompts required for comparison")
+
+    # Build base query with filters
+    query = select(RequestLog).order_by(RequestLog.created_at.desc())
+
+    if app_id:
+        query = query.where(RequestLog.proxy_key_id == app_id)
+    if model:
+        query = query.where(RequestLog.model == model)
+
+    # Time range filter
+    now = datetime.now()
+    if days > 0:
+        cutoff = now - timedelta(days=days)
+        query = query.where(RequestLog.created_at >= cutoff)
+
+    result = await db.execute(query)
+    all_requests = list(result.scalars().all())
+
+    # Extract system prompts
+    system_prompts = extract_system_prompts(all_requests)
+
+    # Get requested prompts
+    compare_prompts = []
+    for hash_val in prompt_hashes:
+        if hash_val in system_prompts:
+            info = system_prompts[hash_val]
+            compare_prompts.append({
+                "hash": hash_val,
+                "content": info["content"],
+                "count": info["count"],
+                "first_seen": info["first_seen"],
+                "last_seen": info["last_seen"],
+                "daily_counts": info["daily_counts"],
+                "model_counts": info["model_counts"],
+            })
+
+    if len(compare_prompts) < 2:
+        raise HTTPException(status_code=404, detail="Not enough prompts found for comparison")
+
+    # Get all dates across all prompts
+    all_dates = set()
+    for prompt in compare_prompts:
+        all_dates.update(prompt["daily_counts"].keys())
+    sorted_dates = sorted(all_dates)
+
+    # Build comparison data for chart
+    chart_datasets = []
+    colors = [
+        {"bg": "rgba(59, 130, 246, 0.5)", "border": "rgb(59, 130, 246)"},
+        {"bg": "rgba(34, 197, 94, 0.5)", "border": "rgb(34, 197, 94)"},
+        {"bg": "rgba(251, 146, 60, 0.5)", "border": "rgb(251, 146, 60)"},
+        {"bg": "rgba(168, 85, 247, 0.5)", "border": "rgb(168, 85, 247)"},
+    ]
+
+    for i, prompt in enumerate(compare_prompts):
+        color = colors[i % len(colors)]
+        chart_datasets.append({
+            "label": f"Prompt {i + 1} ({prompt['hash'][:8]})",
+            "data": [prompt["daily_counts"].get(d, 0) for d in sorted_dates],
+            "backgroundColor": color["bg"],
+            "borderColor": color["border"],
+            "borderWidth": 2,
+            "fill": False,
+            "tension": 0.4,
+        })
+
+    # Build model comparison
+    all_models = set()
+    for prompt in compare_prompts:
+        all_models.update(prompt["model_counts"].keys())
+
+    model_comparison_html = ""
+    for model in sorted(all_models):
+        model_comparison_html += f'<div class="flex items-center justify-between py-2 border-b border-gray-100"><span class="text-sm text-gray-700">{model}</span>'
+        for prompt in compare_prompts:
+            count = prompt["model_counts"].get(model, 0)
+            pct = (count / prompt["count"] * 100) if prompt["count"] > 0 else 0
+            model_comparison_html += f'<span class="text-sm text-gray-500 w-24 text-right">{count} ({pct:.0f}%)</span>'
+        model_comparison_html += '</div>'
+
+    # Escape content for display
+    for prompt in compare_prompts:
+        prompt["content_escaped"] = html_lib.escape(prompt["content"])
+        prompt["first_seen_str"] = prompt["first_seen"].strftime("%Y-%m-%d %H:%M")
+        prompt["last_seen_str"] = prompt["last_seen"].strftime("%Y-%m-%d %H:%M")
+        delta = now - prompt["last_seen"]
+        prompt["days_ago"] = f"{delta.days} days ago"
+
+    # Generate diff for first two prompts (for side-by-side comparison)
+    import difflib
+    diff_html = ""
+    if len(compare_prompts) >= 2:
+        text1 = compare_prompts[0]["content"]
+        text2 = compare_prompts[1]["content"]
+
+        # Split into lines for diff
+        lines1 = text1.splitlines(keepends=True)
+        lines2 = text2.splitlines(keepends=True)
+
+        # Generate unified diff
+        diff = difflib.unified_diff(lines1, lines2, lineterm='', n=10)
+        diff_lines = list(diff)[2:]  # Skip header lines
+
+        # Build colored diff HTML
+        diff_output = []
+        for line in diff_lines:
+            if line.startswith('+') and not line.startswith('+++'):
+                diff_output.append(f'<div class="bg-green-100 border-l-4 border-green-500 pl-2 py-0.5"><span class="text-green-800"><ins>{html_lib.escape(line)}</ins></span></div>')
+            elif line.startswith('-') and not line.startswith('---'):
+                diff_output.append(f'<div class="bg-red-100 border-l-4 border-red-500 pl-2 py-0.5"><span class="text-red-800"><del>{html_lib.escape(line)}</del></span></div>')
+            else:
+                diff_output.append(f'<div class="text-gray-500 pl-2 py-0.5">{html_lib.escape(line)}</div>')
+
+        diff_html = ''.join(diff_output) if diff_output else '<p class="text-gray-500 text-center py-4">No differences found</p>'
+
+    main_content = f"""
+            <!-- Back Link -->
+            <div class="mb-4">
+                <a href="/system-prompts" class="text-sm text-blue-600 hover:text-blue-800">
+                    <i class="fas fa-arrow-left mr-1"></i>Back to System Prompts
+                </a>
+            </div>
+
+            <!-- Header -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h1 class="text-2xl font-bold text-gray-900">
+                    <i class="fas fa-columns text-purple-500 mr-2"></i>Compare System Prompts
+                </h1>
+                <p class="text-sm text-gray-500 mt-1">Comparing {len(compare_prompts)} prompts</p>
+            </div>
+
+            <!-- Prompt Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+    """
+
+    for i, prompt in enumerate(compare_prompts):
+        main_content += f"""
+                <div class="bg-white rounded-lg shadow p-4 border-2 border-purple-200">
+                    <div class="flex justify-between items-start mb-2">
+                        <h3 class="text-lg font-semibold text-gray-800">Prompt {i + 1}</h3>
+                        <span class="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-mono">{prompt['hash'][:8]}</span>
+                    </div>
+                    <div class="space-y-2 mb-3">
+                        <div class="flex justify-between text-sm">
+                            <span class="text-gray-500">Occurrences</span>
+                            <span class="font-semibold text-blue-600">{prompt['count']}</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-gray-500">First Seen</span>
+                            <span class="text-gray-900">{prompt['first_seen_str']}</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-gray-500">Last Seen</span>
+                            <span class="text-gray-900">{prompt['last_seen_str']} ({prompt['days_ago']})</span>
+                        </div>
+                    </div>
+                    <div class="bg-gray-50 rounded p-3 border border-gray-200">
+                        <pre class="text-xs text-gray-700 whitespace-pre-wrap overflow-x-auto" style="max-height: 200px; overflow-y: auto;">{prompt['content_escaped'][:500]}{'...' if len(prompt['content']) > 500 else ''}</pre>
+                    </div>
+                </div>
+        """
+
+    main_content += f"""
+            </div>
+
+            <!-- Usage Comparison Chart -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                    <i class="fas fa-chart-line text-blue-500 mr-2"></i>Daily Usage Comparison
+                </h3>
+                <div class="h-80" style="position:relative;">
+                    <canvas id="compareChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Model Distribution Comparison -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                    <i class="fas fa-chart-pie text-green-500 mr-2"></i>Model Distribution Comparison
+                </h3>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+    """
+
+    for i, prompt in enumerate(compare_prompts):
+        main_content += f'<th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Prompt {i + 1}</th>'
+
+    main_content += f"""
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+    """ + model_comparison_html + f"""
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Prompt Content Diff -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                    <i class="fas fa-code-diff text-orange-500 mr-2"></i>Prompt Content Diff
+                </h3>
+                <div class="bg-gray-50 rounded-lg border border-gray-200 p-4 max-h-96 overflow-y-auto">
+                    {diff_html}
+                </div>
+                <div class="mt-3 flex gap-4 text-xs">
+                    <div class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-green-100 border-l-4 border-green-500"></span>
+                        <span class="text-gray-600">Added (Prompt 2)</span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-red-100 border-l-4 border-red-500"></span>
+                        <span class="text-gray-600">Removed (from Prompt 1)</span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-gray-50"></span>
+                        <span class="text-gray-600">Unchanged</span>
+                    </div>
+                </div>
+            </div>
+    """
+
+    # Chart configuration
+    compare_config = {
+        "type": "line",
+        "data": {
+            "labels": sorted_dates,
+            "datasets": chart_datasets,
+        },
+        "options": {
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "plugins": {"legend": {"position": "top"}},
+            "scales": {"x": {"grid": {"display": False}}, "y": {"beginAtZero": True, "ticks": {"stepSize": 1}}},
+        },
+    }
+
+    chart_head = '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'
+    chart_footer = f"""
+        <script>
+            window._compareChartConfig = {json.dumps(compare_config).replace("</", "<\\/")};
+            function initCompareChart() {{
+                if (typeof Chart === "undefined") {{ window.setTimeout(initCompareChart, 80); return; }}
+                var el = document.getElementById("compareChart");
+                if (el && window._compareChartConfig) {{
+                    try {{ new Chart(el.getContext("2d"), window._compareChartConfig); }} catch(e) {{ console.error("Compare chart:", e); }}
+                    window._compareChartConfig = null;
+                }}
+            }}
+            window.addEventListener("load", initCompareChart);
+        </script>
+    """
+
+    breadcrumbs = render_breadcrumbs([
+        ("Dashboard", "/dashboard"),
+        ("System Prompts", "/system-prompts"),
+        ("Compare", None),
+    ])
+    sidebar = render_sidebar("system-prompts")
+
+    html = render_page(
+        "Compare System Prompts",
+        sidebar,
+        breadcrumbs,
+        main_content,
+        extra_head=chart_head,
+        extra_footer_script=chart_footer,
+    )
+    return html
+
+
+@router.get("/system-prompts/{prompt_hash}", response_class=HTMLResponse)
+async def view_system_prompt_detail(
+    prompt_hash: str,
+    request: Request,
+    db: DbSession,
+    app_id: Optional[str] = None,
+    model: Optional[str] = None,
+    days: int = 7,
+    limit: int = 100,
+):
+    """View detailed information about a specific system prompt."""
+    import html as html_lib
+    import json
+
+    # Build base query with filters
+    query = select(RequestLog).order_by(RequestLog.created_at.desc())
+
+    if app_id:
+        query = query.where(RequestLog.proxy_key_id == app_id)
+    if model:
+        query = query.where(RequestLog.model == model)
+
+    # Time range filter
+    now = datetime.now()
+    if days > 0:
+        cutoff = now - timedelta(days=days)
+        query = query.where(RequestLog.created_at >= cutoff)
+
+    result = await db.execute(query)
+    all_requests = list(result.scalars().all())
+
+    # Extract system prompts and find the requested one
+    system_prompts = extract_system_prompts(all_requests)
+
+    if prompt_hash not in system_prompts:
+        raise HTTPException(status_code=404, detail="System prompt not found")
+
+    prompt_info = system_prompts[prompt_hash]
+
+    # Get proxy key names
+    proxy_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+    proxy_names = {pk.id: pk.name for pk in proxy_result.all()}
+
+    # Build daily distribution for chart
+    sorted_dates = sorted(prompt_info["daily_counts"].keys())
+    daily_data = [prompt_info["daily_counts"].get(d, 0) for d in sorted_dates]
+
+    # Build model distribution
+    model_dist = sorted(prompt_info["model_counts"].items(), key=lambda x: -x[1])
+
+    # Get recent requests for this prompt
+    recent_requests = prompt_info["requests"][:20]
+
+    # Escape prompt content for display
+    prompt_content_escaped = html_lib.escape(prompt_info["content"])
+
+    # Build request rows
+    def _req_row(req):
+        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
+        cache_display = get_cache_read_info(req)
+        cron_task_id = extract_cron_task_info(req.request_body)
+        cron_display = f'<span class="text-xs font-mono text-blue-600">{cron_task_id[:8] if cron_task_id else "-"}</span>' if cron_task_id else '<span class="text-xs text-gray-400">-</span>'
+
+        return (
+            f'<tr class="hover:bg-gray-50">'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.created_at.strftime("%m-%d %H:%M:%S")}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{proxy_names.get(req.proxy_key_id, "Unknown")}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
+            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium">'
+            f'<a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
+            f'</td></tr>'
+        )
+
+    request_rows = "".join(_req_row(req) for req in recent_requests)
+    empty_msg = '<tr><td colspan="9" class="px-4 py-4 text-center text-gray-500">No requests found</td></tr>' if not request_rows else ""
+
+    # Model distribution HTML
+    model_dist_html = "".join([
+        f'<div class="flex items-center justify-between py-2 border-b border-gray-100">'
+        f'<span class="text-sm text-gray-700">{model}</span>'
+        f'<span class="text-sm font-semibold text-gray-900">{count} ({count/prompt_info["count"]*100:.1f}%)</span>'
+        f'</div>'
+        for model, count in model_dist
+    ])
+
+    main_content = f"""
+            <!-- Back Link -->
+            <div class="mb-4">
+                <a href="/system-prompts" class="text-sm text-blue-600 hover:text-blue-800">
+                    <i class="fas fa-arrow-left mr-1"></i>Back to System Prompts
+                </a>
+            </div>
+
+            <!-- Prompt Content Card -->
+            <div class="bg-white rounded-lg shadow p-6 mb-6">
+                <div class="flex justify-between items-start mb-4">
+                    <h1 class="text-2xl font-bold text-gray-900">
+                        <i class="fas fa-file-code text-purple-500 mr-2"></i>System Prompt Details
+                    </h1>
+                    <span class="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-mono">
+                        {prompt_hash[:12]}
+                    </span>
+                </div>
+
+                <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                    <pre class="whitespace-pre-wrap text-sm text-gray-700 overflow-x-auto">{prompt_content_escaped}</pre>
+                </div>
+
+                <div class="flex gap-6 mt-4 text-sm text-gray-500">
+                    <span><i class="fas fa-signal text-blue-500 mr-1"></i>Length: {len(prompt_info["content"])} characters</span>
+                    <span><i class="fas fa-clock text-green-500 mr-1"></i>First seen: {prompt_info["first_seen"].strftime("%Y-%m-%d %H:%M:%S")}</span>
+                    <span><i class="fas fa-calendar text-yellow-500 mr-1"></i>Last seen: {prompt_info["last_seen"].strftime("%Y-%m-%d %H:%M:%S")}</span>
+                </div>
+            </div>
+
+            <!-- Statistics Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Total Occurrences</div>
+                    <div class="text-2xl font-bold text-blue-600">{prompt_info["count"]}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Days Active</div>
+                    <div class="text-2xl font-bold text-gray-900">{len(prompt_info["daily_counts"])}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Models Used</div>
+                    <div class="text-2xl font-bold text-gray-900">{len(prompt_info["model_counts"])}</div>
+                </div>
+                <div class="bg-white rounded-lg shadow p-4">
+                    <div class="text-xs text-gray-500">Avg Per Day</div>
+                    <div class="text-2xl font-bold text-gray-900">{prompt_info["count"] / max(1, len(prompt_info["daily_counts"])):.1f}</div>
+                </div>
+            </div>
+
+            <!-- Charts Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                <!-- Time Distribution Chart -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                        <i class="fas fa-chart-bar text-blue-500 mr-2"></i>Daily Usage
+                    </h3>
+                    <div class="h-64" style="position:relative;">
+                        <canvas id="dailyChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Model Distribution -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
+                        <i class="fas fa-chart-pie text-green-500 mr-2"></i>Model Distribution
+                    </h3>
+                    <div class="space-y-2">
+                        {model_dist_html}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Requests -->
+            <div class="bg-white rounded-lg shadow mb-6">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                    <h3 class="text-lg font-semibold text-gray-800">
+                        <i class="fas fa-history text-gray-500 mr-2"></i>Recent Requests
+                    </h3>
+                    <span class="text-sm text-gray-500">Showing {len(recent_requests)} of {prompt_info["count"]} requests</span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Application</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
+                                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            {request_rows if request_rows else empty_msg}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+    """
+
+    # Chart configuration
+    daily_config = {
+        "type": "bar",
+        "data": {
+            "labels": sorted_dates,
+            "datasets": [{"label": "Requests", "data": daily_data, "backgroundColor": "rgba(59, 130, 246, 0.5)", "borderColor": "rgb(59, 130, 246)", "borderWidth": 1}],
+        },
+        "options": {
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "plugins": {"legend": {"display": False}},
+            "scales": {"x": {"grid": {"display": False}}, "y": {"beginAtZero": True, "ticks": {"stepSize": 1}}},
+        },
+    }
+
+    chart_head = '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'
+    chart_footer = f"""
+        <script>
+            window._dailyChartConfig = {json.dumps(daily_config).replace("</", "<\\/")};
+            function initDailyChart() {{
+                if (typeof Chart === "undefined") {{ window.setTimeout(initDailyChart, 80); return; }}
+                var el = document.getElementById("dailyChart");
+                if (el && window._dailyChartConfig) {{
+                    try {{ new Chart(el.getContext("2d"), window._dailyChartConfig); }} catch(e) {{ console.error("Daily chart:", e); }}
+                    window._dailyChartConfig = null;
+                }}
+            }}
+            window.addEventListener("load", initDailyChart);
+        </script>
+    """
+
+    breadcrumbs = render_breadcrumbs([
+        ("Dashboard", "/dashboard"),
+        ("System Prompts", "/system-prompts"),
+        (f"Prompt {prompt_hash[:8]}...", None),
+    ])
+    sidebar = render_sidebar("system-prompts")
+
+    html = render_page(
+        f"System Prompt: {prompt_hash[:12]}",
+        sidebar,
+        breadcrumbs,
+        main_content,
+        extra_head=chart_head,
+        extra_footer_script=chart_footer,
     )
     return html

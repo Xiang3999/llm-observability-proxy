@@ -1,6 +1,8 @@
 """Advanced analytics routes for deep LLM API analysis."""
 
-from typing import Annotated
+import re
+from typing import Annotated, Optional
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,8 +20,60 @@ router = APIRouter(tags=["Advanced Analytics"])
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
+def extract_cron_task_info(request_body: Optional[dict]) -> Optional[str]:
+    """Extract cron task_id from request body messages.
+
+    Cron messages have format: [cron:task_id Task Name] at the START of user message content.
+    Returns the task_id if found, None otherwise.
+    """
+    if not request_body:
+        return None
+
+    messages = request_body.get("messages", [])
+    for msg in messages:
+        # Only look for user messages
+        if msg.get("role") != "user":
+            continue
+
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            # Match pattern at the START of content: [cron:task_id Task Name]
+            match = re.search(r'^\[cron:([a-f0-9-]+)\s+[^\]]+\]', content, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        # Also handle array format content (like [{type: "text", text: "..."}])
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    match = re.search(r'^\[cron:([a-f0-9-]+)\s+[^\]]+\]', text, re.IGNORECASE)
+                    if match:
+                        return match.group(1)
+    return None
+
+
+def get_tools_schema_length(request_body: Optional[dict]) -> int:
+    """Get the character length of tools schema in request body."""
+    if not request_body:
+        return 0
+    tools = request_body.get("tools", [])
+    if not tools:
+        return 0
+    try:
+        return len(json.dumps(tools, ensure_ascii=False))
+    except:
+        return 0
+
+
 @router.get("/applications/{app_id}/deep-analytics", response_class=HTMLResponse)
-async def deep_application_analytics(app_id: str, request: Request, db: DbSession):
+async def deep_application_analytics(
+    app_id: str,
+    request: Request,
+    db: DbSession,
+    days: int = 7,
+    limit: int = 200,
+    cron_task: Optional[str] = None
+):
     """Deep analytics view for analyzing LLM API communication patterns.
 
     This page provides insights similar to the Claude Code API analysis article:
@@ -45,14 +99,33 @@ async def deep_application_analytics(app_id: str, request: Request, db: DbSessio
 
     proxy_key, provider_key = proxy_result
 
-    # Get all requests for this application (limit to 200 for performance)
-    requests_result = await db.execute(
+    # Get all requests for this application with time range filter
+    now = datetime.now()
+    if days == 0:
+        cutoff_date = now - timedelta(days=365*10)  # Far past
+    else:
+        cutoff_date = now - timedelta(days=days)
+
+    # Build base query with filters
+    query = (
         select(RequestLog)
         .where(RequestLog.proxy_key_id == app_id)
+        .where(RequestLog.created_at >= cutoff_date)
         .order_by(RequestLog.created_at.desc())
-        .limit(200)
+        .limit(limit)
     )
+
+    requests_result = await db.execute(query)
     all_requests = list(requests_result.scalars().all())
+
+    # Filter by cron_task if specified (client-side filtering since we need to parse request_body)
+    if cron_task:
+        filtered_requests = []
+        for req in all_requests:
+            task_id = extract_cron_task_info(req.request_body)
+            if task_id and cron_task.lower() in task_id.lower():
+                filtered_requests.append(req)
+        all_requests = filtered_requests
 
     # ===== Deep Analysis =====
 
@@ -120,6 +193,8 @@ async def deep_application_analytics(app_id: str, request: Request, db: DbSessio
             "total": req.total_tokens or 0,
             "cache_read": req.cache_read_tokens or 0,
             "cache_creation": req.cache_creation_tokens or 0,
+            "cron_task_id": extract_cron_task_info(request_body),
+            "tools_schema_length": get_tools_schema_length(request_body),
         })
 
     # 4. System-reminder Detection
@@ -237,7 +312,16 @@ async def deep_application_analytics(app_id: str, request: Request, db: DbSessio
         for entry, count in cc_entrypoints.items()
     ])
     token_breakdown_rows = "".join([
-        f'<tr class="border-t"><td class="px-4 py-2 font-mono">{item["id"]}</td><td class="px-4 py-2 text-right">{item["system"]:,}</td><td class="px-4 py-2 text-right">{item["user"]:,}</td><td class="px-4 py-2 text-right">{item["assistant"]:,}</td><td class="px-4 py-2 text-right">{item["tool"]:,}</td><td class="px-4 py-2 text-right">{item["total"]:,}</td><td class="px-4 py-2 text-right text-blue-600">{item["cache_read"]:,}</td><td class="px-4 py-2 text-right text-orange-600">{item["cache_creation"]:,}</td></tr>'
+        f'<tr class="border-t"><td class="px-4 py-2 font-mono">{item["id"]}</td>'
+        f'<td class="px-4 py-2 text-right">{item["system"]:,}</td>'
+        f'<td class="px-4 py-2 text-right">{item["user"]:,}</td>'
+        f'<td class="px-4 py-2 text-right">{item["assistant"]:,}</td>'
+        f'<td class="px-4 py-2 text-right">{item["tool"]:,}</td>'
+        f'<td class="px-4 py-2 text-right">{item["total"]:,}</td>'
+        f'<td class="px-4 py-2 text-right text-blue-600">{item["cache_read"]:,}</td>'
+        f'<td class="px-4 py-2 text-right text-orange-600">{item["cache_creation"]:,}</td>'
+        f'<td class="px-4 py-2 text-right text-sm">{item["cron_task_id"][:8] if item["cron_task_id"] else "-"}</td>'
+        f'<td class="px-4 py-2 text-right text-xs text-gray-500">{item["tools_schema_length"]:,}</td></tr>'
         for item in token_breakdown_data
     ])
     system_reminder_types_html = "".join([
@@ -266,6 +350,58 @@ async def deep_application_analytics(app_id: str, request: Request, db: DbSessio
         ("Deep Analytics", None),
     ])
     main_content = f"""
+            <!-- Time Range and Analysis Controls -->
+            <div class="bg-white rounded-lg shadow p-4 mb-6">
+                <form method="GET" class="flex flex-wrap items-end gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            <i class="fas fa-calendar mr-1"></i>Time Range
+                        </label>
+                        <select name="days" onchange="this.form.submit()" class="px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500">
+                            <option value="1" {'selected' if days == 1 else ''}>Last 24 hours</option>
+                            <option value="3" {'selected' if days == 3 else ''}>Last 3 days</option>
+                            <option value="7" {'selected' if days == 7 else ''}>Last 7 days</option>
+                            <option value="30" {'selected' if days == 30 else ''}>Last 30 days</option>
+                            <option value="90" {'selected' if days == 90 else ''}>Last 90 days</option>
+                            <option value="0" {'selected' if days == 0 else ''}>All time</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            <i class="fas fa-list mr-1"></i>Request Limit
+                        </label>
+                        <select name="limit" onchange="this.form.submit()" class="px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500">
+                            <option value="100" {'selected' if limit == 100 else ''}>100 requests</option>
+                            <option value="200" {'selected' if limit == 200 else ''}>200 requests</option>
+                            <option value="500" {'selected' if limit == 500 else ''}>500 requests</option>
+                            <option value="1000" {'selected' if limit == 1000 else ''}>1000 requests</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            <i class="fas fa-clock mr-1"></i>Cron Task
+                        </label>
+                        <input type="text" name="cron_task" value="{cron_task or ''}" placeholder="Task ID"
+                               class="px-3 py-2 border border-gray-300 rounded-md text-sm"
+                               title="Filter by cron task ID">
+                    </div>
+                    <div class="flex items-end">
+                        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                            <i class="fas fa-filter mr-2"></i>Apply Filters
+                        </button>
+                        <a href="/applications/{app_id}/deep-analytics" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 ml-2">
+                            <i class="fas fa-times"></i>
+                        </a>
+                    </div>
+                    <div class="flex-1 text-right">
+                        <span class="text-sm text-gray-500">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Showing data for <span class="font-medium text-blue-600">{days if days > 0 else 'all'} days</span> / Analyzing last <span class="font-medium text-blue-600">{len(all_requests)}</span> requests
+                        </span>
+                    </div>
+                </form>
+            </div>
+
             <p class="text-sm text-gray-500 mb-6">
                 Provider: {provider_key.name} ({provider_key.provider.value}) |
                 Total Requests: {total_requests} |
@@ -360,6 +496,8 @@ async def deep_application_analytics(app_id: str, request: Request, db: DbSessio
                                 <th class="px-4 py-2 text-right">Total</th>
                                 <th class="px-4 py-2 text-right">Cache Read</th>
                                 <th class="px-4 py-2 text-right">Cache Create</th>
+                                <th class="px-4 py-2 text-right">Cron Task ID</th>
+                                <th class="px-4 py-2 text-right">Tools Schema Len</th>
                             </tr>
                         </thead>
                         <tbody>

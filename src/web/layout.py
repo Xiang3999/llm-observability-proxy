@@ -2,7 +2,7 @@
 
 from typing import List, Tuple, Optional
 
-# current_section: "dashboard" | "requests" | "applications"
+# current_section: "dashboard" | "requests" | "applications" | "system-prompts"
 def render_sidebar(
     current_section: str,
     app_id: Optional[str] = None,
@@ -11,6 +11,7 @@ def render_sidebar(
     dash_cls = 'bg-blue-50 text-blue-700 border-l-4 border-blue-600' if current_section == "dashboard" else 'text-gray-700 hover:bg-gray-100'
     req_cls = 'bg-blue-50 text-blue-700 border-l-4 border-blue-600' if current_section == "requests" else 'text-gray-700 hover:bg-gray-100'
     app_cls = 'bg-blue-50 text-blue-700 border-l-4 border-blue-600' if current_section == "applications" else 'text-gray-700 hover:bg-gray-100'
+    sys_prompt_cls = 'bg-blue-50 text-blue-700 border-l-4 border-blue-600' if current_section == "system-prompts" else 'text-gray-700 hover:bg-gray-100'
 
     return f"""
     <aside id="sidebar" class="fixed left-0 top-0 z-30 h-screen w-64 flex flex-col bg-white shadow-lg border-r border-gray-200 transform transition-transform duration-200 -translate-x-full md:translate-x-0">
@@ -31,6 +32,10 @@ def render_sidebar(
             <a href="/dashboard#proxy-keys" class="flex items-center px-3 py-2.5 rounded-lg {app_cls}">
                 <i class="fas fa-cubes w-5 mr-3 text-center"></i>
                 <span>Applications</span>
+            </a>
+            <a href="/system-prompts" class="flex items-center px-3 py-2.5 rounded-lg {sys_prompt_cls}">
+                <i class="fas fa-file-code w-5 mr-3 text-center"></i>
+                <span>System Prompts</span>
             </a>
         </nav>
         <div class="p-3 border-t border-gray-200">
