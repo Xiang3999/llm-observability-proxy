@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import func
 
 from src.models.database import Base
+from src.models.page_view import PageView  # noqa: F401 - required for relationship
 
 
 class ProxyKey(Base):

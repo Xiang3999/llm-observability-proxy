@@ -2,40 +2,39 @@
 
 import hashlib
 import secrets
+import bcrypt
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from passlib.context import CryptContext
 
 from src.models.provider_key import ProviderKey, ProviderType
 from src.models.proxy_key import ProxyKey
 from src.models.request_log import RequestLog
 
 
-# Password hashing context for API keys
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 def generate_proxy_key() -> str:
     """Generate a new proxy key.
 
-    Format: sk-proxy-<random>-<uuid>
+    Format: sk-helicone-proxy-<random>-<uuid>
     """
     import uuid
     random_part = secrets.token_urlsafe(16)
     uuid_part = str(uuid.uuid4())
-    return f"sk-proxy-{random_part}-{uuid_part}"
+    return f"sk-helicone-proxy-{random_part}-{uuid_part}"
 
 
 def hash_key(key: str) -> str:
     """Hash an API key for secure storage."""
-    return pwd_context.hash(key)
+    # Generate a salt and hash the key
+    salt = bcrypt.gensalt(rounds=12)
+    hashed = bcrypt.hashpw(key.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
 
 
 def verify_key(plain_key: str, hashed_key: str) -> bool:
     """Verify a plain key against a hashed key."""
     try:
-        return pwd_context.verify(plain_key, hashed_key)
+        return bcrypt.checkpw(plain_key.encode('utf-8'), hashed_key.encode('utf-8'))
     except Exception:
         return False
 
