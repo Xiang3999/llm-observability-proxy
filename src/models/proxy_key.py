@@ -46,5 +46,11 @@ class ProxyKey(Base):
         cascade="all, delete-orphan"
     )
 
+    # Relationship to page views
+    page_views: Mapped[list["PageView"]] = relationship(  # noqa: F821
+        back_populates="proxy_key",
+        cascade="all, delete-orphan"
+    )
+
     def __repr__(self) -> str:
         return f"<ProxyKey(id={self.id}, name={self.name})>"

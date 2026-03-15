@@ -5,6 +5,7 @@ import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from src.config import settings
 from src.models.database import init_db
@@ -14,6 +15,7 @@ from src.analytics.provider_routes import router as provider_keys_router
 from src.analytics.request_routes import router as requests_router
 from src.analytics.deep_analytics import router as deep_analytics_router
 from src.web.routes import router as web_router
+from src.web.middleware import PageViewMiddleware
 
 # Configure logging
 structlog.configure(
@@ -70,6 +72,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add page view tracking middleware
+app.add_middleware(PageViewMiddleware)
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -96,12 +101,8 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
-    return {
-        "name": "LLM Observability Proxy",
-        "version": "0.1.0",
-        "docs": "/docs"
-    }
+    """Root endpoint - redirect to dashboard."""
+    return RedirectResponse(url="/dashboard")
 
 
 if __name__ == "__main__":

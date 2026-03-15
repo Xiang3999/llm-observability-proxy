@@ -12,6 +12,7 @@ from src.models.database import get_db
 from src.models.request_log import RequestLog
 from src.models.proxy_key import ProxyKey
 from src.models.provider_key import ProviderKey, ProviderType
+from src.models.page_view import PageView
 from src.auth.key_manager import KeyManager
 from src.config import settings
 from src.web.layout import render_sidebar, render_breadcrumbs, render_app_tabs, render_page
@@ -22,7 +23,7 @@ router = APIRouter(tags=["Web"])
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-def extract_cron_task_info(request_body: Optional[dict]) -> Optional[str]:
+def extract_cron_task_info(request_body: Optional[Dict]) -> Optional[str]:
     """Extract cron task_id from request body messages.
 
     Cron messages have format: [cron:task_id Task Name] at the START of user message content.
@@ -111,18 +112,25 @@ def render_request_table_row(
         # System prompt detail style - compact with proxy name
         time_str = req.created_at.strftime("%m-%d %H:%M:%S")
         proxy_name = proxy_names.get(req.proxy_key_id, "Unknown") if proxy_names else "Unknown"
+        status_cls = "bg-green-100 text-green-800" if (req.status_code and req.status_code < 400) else "bg-red-100 text-red-800"
+        cache_display = get_cache_read_info(req)
+        cron_task_id = extract_cron_task_info(req.request_body)
+        cron_display = (
+            f'<span class="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded">{cron_task_id[:8]}</span>' if cron_task_id
+            else '<span class="text-xs text-gray-400">-</span>'
+        )
         return (
-            f'<tr class="hover:bg-gray-50">'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{time_str}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{proxy_name}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-900">{req.model or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs"><span class="px-2 py-1 rounded-full text-xs font-semibold {status_cls}">{req.status_code or "N/A"}</span></td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_tokens or "-"}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{req.total_latency_ms or "-"}ms</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs text-gray-500">{cache_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
-            f'<td class="px-4 py-3 whitespace-nowrap text-right text-xs font-medium">'
-            f'<a href="/requests/{req.id}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
+            f'<tr class="group hover:bg-gradient-to-r hover:from-gray-50/80 hover:to-transparent transition-all duration-200">'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600 font-mono">{time_str}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{proxy_name}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-700">{req.model or "-"}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs"><span class="px-2.5 py-1 rounded-full text-xs font-semibold {status_cls} shadow-sm">{req.status_code or "N/A"}</span></td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600">{req.total_tokens or "-"}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600">{req.total_latency_ms or "-"}ms</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600">{cache_display}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs">{cron_display}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-right text-xs font-medium">'
+            f'<a href="/requests/{req.id}" class="inline-flex items-center gap-1 text-blue-600 hover:text-blue-800 hover:underline transition-colors duration-200"><i class="fas fa-eye"></i> View</a>'
             f'</td>'
             f'</tr>'
         )
@@ -335,147 +343,205 @@ async def dashboard(
 
     main_content = f"""
             <!-- Alert Messages -->
-            {f'<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">{success}</div>' if success else ''}
-            {f'<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">{error}</div>' if error else ''}
+            {f'<div class="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-xl mb-6 flex items-center gap-2"><i class="fas fa-check-circle text-green-500"></i>{success}</div>' if success else ''}
+            {f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl mb-6 flex items-center gap-2"><i class="fas fa-exclamation-circle text-red-500"></i>{error}</div>' if error else ''}
 
             <!-- Summary Cards -->
             <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8" id="stats">
-                <div class="bg-white rounded-lg shadow p-6">
-                    <div class="flex items-center">
-                        <div class="p-3 bg-blue-100 rounded-full">
-                            <i class="fas fa-exchange-alt text-blue-600"></i>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-blue-500/10 to-indigo-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center justify-between mb-4 relative">
+                        <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
+                            <i class="fas fa-exchange-alt text-white text-lg"></i>
                         </div>
-                        <div class="ml-4">
-                            <h3 class="text-sm font-medium text-gray-500">Total Requests</h3>
-                            <p class="text-3xl font-bold text-gray-900">{row.total_requests or 0}</p>
-                        </div>
+                        <span class="text-xs font-medium text-gray-500">Requests</span>
+                    </div>
+                    <div class="relative">
+                        <p class="text-3xl font-bold text-gray-900">{row.total_requests or 0}</p>
+                        <p class="text-xs text-gray-500 mt-1">Total processed</p>
                     </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-6">
-                    <div class="flex items-center">
-                        <div class="p-3 bg-green-100 rounded-full">
-                            <i class="fas fa-coins text-green-600"></i>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center justify-between mb-4 relative">
+                        <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-lg shadow-green-500/30">
+                            <i class="fas fa-coins text-white text-lg"></i>
                         </div>
-                        <div class="ml-4">
-                            <h3 class="text-sm font-medium text-gray-500">Total Tokens</h3>
-                            <p class="text-3xl font-bold text-gray-900">{row.total_tokens or 0:,}</p>
-                        </div>
+                        <span class="text-xs font-medium text-gray-500">Tokens</span>
+                    </div>
+                    <div class="relative">
+                        <p class="text-3xl font-bold text-gray-900">{row.total_tokens or 0:,}</p>
+                        <p class="text-xs text-gray-500 mt-1">Total consumed</p>
                     </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-6">
-                    <div class="flex items-center">
-                        <div class="p-3 bg-yellow-100 rounded-full">
-                            <i class="fas fa-clock text-yellow-600"></i>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center justify-between mb-4 relative">
+                        <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
+                            <i class="fas fa-clock text-white text-lg"></i>
                         </div>
-                        <div class="ml-4">
-                            <h3 class="text-sm font-medium text-gray-500">Avg Latency</h3>
-                            <p class="text-3xl font-bold text-gray-900">{int(row.avg_latency or 0)}ms</p>
-                        </div>
+                        <span class="text-xs font-medium text-gray-500">Latency</span>
+                    </div>
+                    <div class="relative">
+                        <p class="text-3xl font-bold text-gray-900">{int(row.avg_latency or 0)}ms</p>
+                        <p class="text-xs text-gray-500 mt-1">Average</p>
                     </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-6">
-                    <div class="flex items-center">
-                        <div class="p-3 bg-purple-100 rounded-full">
-                            <i class="fas fa-application text-purple-600"></i>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-purple-500/10 to-indigo-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center justify-between mb-4 relative">
+                        <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-purple-500/30">
+                            <i class="fas fa-application text-white text-lg"></i>
                         </div>
-                        <div class="ml-4">
-                            <h3 class="text-sm font-medium text-gray-500">Applications</h3>
-                            <p class="text-3xl font-bold text-gray-900">{len(apps)}</p>
-                        </div>
+                        <span class="text-xs font-medium text-gray-500">Apps</span>
+                    </div>
+                    <div class="relative">
+                        <p class="text-3xl font-bold text-gray-900">{len(apps)}</p>
+                        <p class="text-xs text-gray-500 mt-1">Active apps</p>
                     </div>
                 </div>
             </div>
 
             <!-- Provider Keys Section -->
-            <div class="bg-white rounded-lg shadow mb-8" id="provider-keys">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                    <h2 class="text-lg font-semibold text-gray-800">
-                        <i class="fas fa-key text-blue-500 mr-2"></i>Provider Keys
-                    </h2>
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8" id="provider-keys">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                            <i class="fas fa-key text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h2 class="text-lg font-bold text-gray-800">Provider Keys</h2>
+                            <p class="text-xs text-gray-500 mt-0.5">Manage your API provider connections</p>
+                        </div>
+                    </div>
                     <button onclick="document.getElementById('add-provider-modal').classList.remove('hidden')"
-                            class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700">
-                        <i class="fas fa-plus mr-2"></i>Add Provider Key
+                            class="inline-flex items-center gap-2 bg-gradient-to-r from-blue-500 to-indigo-600 text-white px-4 py-2 rounded-xl hover:shadow-lg hover:shadow-blue-500/30 transition-all duration-200 font-medium text-sm">
+                        <i class="fas fa-plus mr-1"></i>Add Provider Key
                     </button>
                 </div>
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-gray-200">
-                        {provider_keys_rows if provider_keys_rows else '<tr><td colspan="4" class="px-6 py-4 text-center text-gray-500">No provider keys configured</td></tr>'}
-                    </tbody>
-                </table>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-tag text-gray-400 text-xs mr-2"></i>Name
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-cloud text-gray-400 text-xs mr-2"></i>Provider
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-calendar text-gray-400 text-xs mr-2"></i>Created
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {provider_keys_rows if provider_keys_rows else '<tr><td colspan="4" class="px-6 py-8 text-center text-gray-500">No provider keys configured</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Proxy Keys Section -->
-            <div class="bg-white rounded-lg shadow mb-8" id="proxy-keys">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8" id="proxy-keys">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
                     <div>
-                        <h2 class="text-lg font-semibold text-gray-800">
-                            <i class="fas fa-shield-alt text-green-500 mr-2"></i>Proxy Keys (Applications)
-                        </h2>
-                        <p class="text-xs text-gray-500 mt-1">
-                            <i class="fas fa-info-circle mr-1"></i>
-                            Click application name for <span class="text-blue-600 font-medium">Analytics</span> or <span class="text-purple-600 font-medium"><i class="fas fa-flask"></i> Deep Analytics</span>
-                        </p>
+                        <div class="flex items-center gap-3 mb-1">
+                            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                                <i class="fas fa-shield-alt text-white text-sm"></i>
+                            </div>
+                            <div>
+                                <h2 class="text-lg font-bold text-gray-800">Proxy Keys (Applications)</h2>
+                                <p class="text-xs text-gray-500 mt-0.5">Manage applications and their analytics</p>
+                            </div>
+                        </div>
                     </div>
                     <button onclick="document.getElementById('add-proxy-modal').classList.remove('hidden')"
-                            class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700">
-                        <i class="fas fa-plus mr-2"></i>Add Proxy Key
+                            class="inline-flex items-center gap-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white px-4 py-2 rounded-xl hover:shadow-lg hover:shadow-green-500/30 transition-all duration-200 font-medium text-sm">
+                        <i class="fas fa-plus mr-1"></i>Add Proxy Key
                     </button>
                 </div>
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Proxy Key</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requests</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-gray-200">
-                        {proxy_keys_rows if proxy_keys_rows else '<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500">No proxy keys configured</td></tr>'}
-                    </tbody>
-                </table>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-cube text-gray-400 text-xs mr-2"></i>Application
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-key text-gray-400 text-xs mr-2"></i>Proxy Key
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-cloud text-gray-400 text-xs mr-2"></i>Provider
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Requests</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-calendar text-gray-400 text-xs mr-2"></i>Created
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {proxy_keys_rows}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Recent Requests -->
-            <div class="bg-white rounded-lg shadow mb-8">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                    <h2 class="text-lg font-semibold text-gray-800">
-                        <i class="fas fa-history text-gray-500 mr-2"></i>Recent Requests
-                    </h2>
-                    <a href="/requests" class="text-sm text-blue-600 hover:text-blue-800">
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-gray-500 to-slate-600 flex items-center justify-center shadow-md shadow-gray-500/25">
+                            <i class="fas fa-history text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h2 class="text-lg font-bold text-gray-800">Recent Requests</h2>
+                            <p class="text-xs text-gray-500 mt-0.5">Latest {len(recent_requests)} requests</p>
+                        </div>
+                    </div>
+                    <a href="/requests" class="inline-flex items-center gap-1.5 text-sm font-medium text-blue-600 hover:text-blue-800 transition-colors duration-200">
                         View All <i class="fas fa-arrow-right ml-1"></i>
                     </a>
                 </div>
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Application</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-gray-200">
-                        {recent_requests_rows if recent_requests_rows else '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">No requests yet</td></tr>'}
-                    </tbody>
-                </table>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-clock text-gray-400 text-xs mr-2"></i>Time
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-cube text-gray-400 text-xs mr-2"></i>Application
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-microchip text-gray-400 text-xs mr-2"></i>Model
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-coins text-gray-400 text-xs mr-2"></i>Tokens
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-tachometer-alt text-gray-400 text-xs mr-2"></i>Latency
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-dollar-sign text-gray-400 text-xs mr-2"></i>Cost
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-database text-gray-400 text-xs mr-2"></i>Cache Read
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-clock text-gray-400 text-xs mr-2"></i>Cron Task
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {recent_requests_rows if recent_requests_rows else '<tr><td colspan="10" class="px-6 py-8 text-center text-gray-500">No requests yet</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
         <!-- Add Provider Key Modal -->
@@ -2189,28 +2255,62 @@ async def list_system_prompts(
         if info["last_seen"]:
             delta = now - info["last_seen"]
             if delta.days == 0:
-                days_ago = "Today"
+                days_ago = '<span class="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-xs font-medium">Today</span>'
             elif delta.days == 1:
-                days_ago = "Yesterday"
+                days_ago = '<span class="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-medium">Yesterday</span>'
+            elif delta.days <= 7:
+                days_ago = f'<span class="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-xs font-medium">{delta.days} days ago</span>'
             else:
-                days_ago = f"{delta.days} days ago"
+                days_ago = f'<span class="text-gray-400">{delta.days} days ago</span>'
+
+        # Gradient color based on count
+        count_color = "from-blue-500 to-cyan-500" if info["count"] > 50 else "from-purple-500 to-indigo-500" if info["count"] > 20 else "from-gray-400 to-gray-500"
 
         return (
-            f'<tr class="hover:bg-gray-50 cursor-pointer" onclick="window.location.href=\'/system-prompts/{prompt_hash}\'">'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 w-10">'
-            f'<input type="checkbox" name="selected_prompts" value="{prompt_hash}" class="rounded border-gray-300" onclick="event.stopPropagation()">'
+            f'<tr class="group hover:bg-gradient-to-r hover:from-blue-50/50 hover:to-purple-50/30 cursor-pointer transition-all duration-200 table-row-hover" onclick="window.location.href=\'/system-prompts/{prompt_hash}\'">'
+            f'<td class="px-6 py-4 whitespace-nowrap w-12">'
+            f'<input type="checkbox" name="selected_prompts" value="{prompt_hash}" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer" onclick="event.stopPropagation()">'
             f'</td>'
             f'<td class="px-6 py-4">'
-            f'<div class="text-sm text-gray-900 line-clamp-2">{preview_escaped}</div>'
-            f'<div class="text-xs text-gray-500 mt-1 font-mono">{prompt_hash[:8]}...</div>'
+            f'<div class="flex items-start gap-3">'
+            f'<div class="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500/10 to-indigo-500/10 flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform duration-200">'
+            f'<i class="fas fa-file-code text-purple-500 text-sm"></i>'
+            f'</div>'
+            f'<div class="flex-1 min-w-0">'
+            f'<div class="text-sm text-gray-900 line-clamp-2 font-medium">{preview_escaped}</div>'
+            f'<div class="flex items-center gap-2 mt-1.5">'
+            f'<span class="px-2 py-0.5 bg-gray-100 text-gray-600 rounded text-xs font-mono">{prompt_hash[:8]}</span>'
+            f'</div>'
+            f'</div>'
+            f'</div>'
             f'</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm font-semibold text-blue-600">{info["count"]}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{first_seen}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap">'
+            f'<div class="flex items-center gap-2">'
+            f'<div class="w-10 h-10 rounded-lg bg-gradient-to-br {count_color} flex items-center justify-center shadow-md">'
+            f'<span class="text-white font-bold text-sm">{info["count"]}</span>'
+            f'</div>'
+            f'<span class="text-xs text-gray-500">requests</span>'
+            f'</div>'
+            f'</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">'
-            f'<div>{last_seen}</div><div class="text-xs text-gray-400">{days_ago}</div>'
+            f'<div class="flex items-center gap-2">'
+            f'<i class="fas fa-calendar-check text-emerald-400"></i>'
+            f'<span class="font-mono text-sm">{first_seen}</span>'
+            f'</div>'
             f'</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">'
-            f'<a href="/system-prompts/{prompt_hash}" class="text-blue-600 hover:text-blue-900"><i class="fas fa-eye"></i> View</a>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm">'
+            f'<div class="flex items-center gap-2">'
+            f'<i class="fas fa-clock text-amber-400"></i>'
+            f'<div>'
+            f'<div class="font-mono text-sm text-gray-700">{last_seen}</div>'
+            f'{days_ago}'
+            f'</div>'
+            f'</div>'
+            f'</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-right">'
+            f'<a href="/system-prompts/{prompt_hash}" class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 hover:scale-105 transition-all duration-200 font-medium text-sm">'
+            f'<i class="fas fa-eye"></i> View'
+            f'</a>'
             f'</td></tr>'
         )
 
@@ -2234,106 +2334,164 @@ async def list_system_prompts(
     next_cls = "opacity-50 cursor-not-allowed" if page == total_pages else "hover:bg-gray-50"
 
     pagination_html = (
-        f'<div class="flex justify-center mt-6"><nav class="flex gap-2">'
-        f'<a href="{prev_url}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg {prev_cls}"><i class="fas fa-chevron-left"></i> Previous</a>'
-        f'<span class="px-4 py-2 bg-blue-600 text-white rounded-lg">Page {page} of {total_pages}</span>'
-        f'<a href="{next_url}" class="px-4 py-2 bg-white border border-gray-300 rounded-lg {next_cls}">Next <i class="fas fa-chevron-right"></i></a>'
+        f'<div class="flex justify-center mt-8"><nav class="flex items-center gap-2">'
+        f'<a href="{prev_url}" class="group px-4 py-2 bg-white border border-gray-200 rounded-xl {prev_cls} text-sm font-medium text-gray-700 hover:text-blue-600 transition-all duration-200 flex items-center gap-2">'
+        f'<i class="fas fa-chevron-left"></i> <span class="hidden sm:inline">Previous</span>'
+        f'</a>'
+        f'<span class="px-5 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-xl text-sm font-bold shadow-md shadow-purple-500/25">Page {page} of {total_pages}</span>'
+        f'<a href="{next_url}" class="group px-4 py-2 bg-white border border-gray-200 rounded-xl {next_cls} text-sm font-medium text-gray-700 hover:text-blue-600 transition-all duration-200 flex items-center gap-2">'
+        f'<span class="hidden sm:inline">Next</span> <i class="fas fa-chevron-right"></i>'
+        f'</a>'
         f'</nav></div>'
     ) if total_pages > 1 else ""
 
     main_content = f"""
-            <div class="flex justify-between items-center mb-6">
-                <div>
-                    <h1 class="text-2xl font-bold text-gray-900">
-                        <i class="fas fa-file-code text-purple-500 mr-2"></i>System Prompts Analysis
-                    </h1>
-                    <p class="text-sm text-gray-500 mt-1">
-                        Analyze and compare system prompts across your requests
-                    </p>
+            <!-- Page Header -->
+            <div class="relative mb-8 pb-6 border-b border-gray-200/60">
+                <div class="absolute inset-0 bg-gradient-to-r from-purple-50/50 via-transparent to-blue-50/50 rounded-2xl -z-10"></div>
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="flex items-center gap-3 mb-2">
+                            <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-purple-500/25">
+                                <i class="fas fa-file-code text-white text-xl"></i>
+                            </div>
+                            <div>
+                                <h1 class="text-3xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">System Prompts</h1>
+                                <p class="text-sm text-gray-500 font-medium">Analyze and compare system prompts across requests</p>
+                            </div>
+                        </div>
+                    </div>
+                    <a href="/deep-analytics" class="group flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-lg font-medium text-sm shadow-md shadow-purple-500/25 hover:shadow-purple-500/35 transition-all duration-300 hover:scale-105">
+                        <i class="fas fa-flask mr-1"></i>Deep Analytics
+                    </a>
                 </div>
-                <a href="/deep-analytics" class="text-sm text-purple-600 hover:text-purple-800">
-                    <i class="fas fa-flask mr-1"></i>Deep Analytics
-                </a>
             </div>
 
-            <!-- Summary Stats -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Unique Prompts</div>
-                    <div class="text-xl font-bold text-gray-900">{total_unique_prompts}</div>
+            <!-- Summary Stats Cards -->
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                <div class="group relative bg-white rounded-2xl p-5 shadow-sm border border-gray-200/60 hover:shadow-lg hover:shadow-purple-500/10 transition-all duration-300 overflow-hidden">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-purple-500/10 to-transparent rounded-bl-full -z-0"></div>
+                    <div class="relative z-10">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-md shadow-purple-500/25">
+                                <i class="fas fa-fingerprint text-white text-sm"></i>
+                            </div>
+                            <span class="text-sm font-medium text-gray-500">Unique Prompts</span>
+                        </div>
+                        <div class="text-3xl font-bold bg-gradient-to-r from-purple-600 to-indigo-600 bg-clip-text text-transparent">{total_unique_prompts}</div>
+                    </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Total Requests</div>
-                    <div class="text-xl font-bold text-gray-900">{total_requests_with_system:,}</div>
+
+                <div class="group relative bg-white rounded-2xl p-5 shadow-sm border border-gray-200/60 hover:shadow-lg hover:shadow-blue-500/10 transition-all duration-300 overflow-hidden">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-blue-500/10 to-transparent rounded-bl-full -z-0"></div>
+                    <div class="relative z-10">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-cyan-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                                <i class="fas fa-inbox text-white text-sm"></i>
+                            </div>
+                            <span class="text-sm font-medium text-gray-500">Total Requests</span>
+                        </div>
+                        <div class="text-3xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">{total_requests_with_system:,}</div>
+                    </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Avg Requests/Prompt</div>
-                    <div class="text-xl font-bold text-gray-900">{total_requests_with_system / max(1, total_unique_prompts):.1f}</div>
+
+                <div class="group relative bg-white rounded-2xl p-5 shadow-sm border border-gray-200/60 hover:shadow-lg hover:shadow-emerald-500/10 transition-all duration-300 overflow-hidden">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-emerald-500/10 to-transparent rounded-bl-full -z-0"></div>
+                    <div class="relative z-10">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-md shadow-emerald-500/25">
+                                <i class="fas fa-arrow-right-arrow-left text-white text-sm"></i>
+                            </div>
+                            <span class="text-sm font-medium text-gray-500">Avg Requests/Prompt</span>
+                        </div>
+                        <div class="text-3xl font-bold bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">{total_requests_with_system / max(1, total_unique_prompts):.1f}</div>
+                    </div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Time Range</div>
-                    <div class="text-xl font-bold text-gray-900">{days if days > 0 else 'All'} days</div>
+
+                <div class="group relative bg-white rounded-2xl p-5 shadow-sm border border-gray-200/60 hover:shadow-lg hover:shadow-amber-500/10 transition-all duration-300 overflow-hidden">
+                    <div class="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-amber-500/10 to-transparent rounded-bl-full -z-0"></div>
+                    <div class="relative z-10">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-md shadow-amber-500/25">
+                                <i class="fas fa-calendar text-white text-sm"></i>
+                            </div>
+                            <span class="text-sm font-medium text-gray-500">Time Range</span>
+                        </div>
+                        <div class="text-3xl font-bold bg-gradient-to-r from-amber-600 to-orange-600 bg-clip-text text-transparent">{days if days > 0 else 'All'} days</div>
+                    </div>
                 </div>
             </div>
 
             <!-- Filters -->
-            <div class="bg-white rounded-lg shadow p-4 mb-6">
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl p-6 mb-6 shadow-sm border border-gray-200/60">
                 <form method="GET" action="/system-prompts" class="flex flex-wrap gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Application</label>
-                        <select name="app_id" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                    <div class="flex-1 min-w-[180px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-cube text-gray-400 mr-1.5"></i>Application
+                        </label>
+                        <select name="app_id" class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200">
                             <option value="">All Applications</option>
                             {app_options}
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Model</label>
-                        <select name="model" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                    <div class="flex-1 min-w-[150px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-robot text-gray-400 mr-1.5"></i>Model
+                        </label>
+                        <select name="model" class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200">
                             <option value="">All Models</option>
                             {model_options}
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                        <select name="status" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                    <div class="flex-1 min-w-[150px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-circle-check text-gray-400 mr-1.5"></i>Status
+                        </label>
+                        <select name="status" class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200">
                             <option value="">All Status</option>
-                            <option value="200" {"selected" if status == "200" else ""}>200 OK</option>
-                            <option value="400" {"selected" if status == "400" else ""}>400 Bad Request</option>
-                            <option value="401" {"selected" if status == "401" else ""}>401 Unauthorized</option>
-                            <option value="429" {"selected" if status == "429" else ""}>429 Too Many Requests</option>
-                            <option value="500" {"selected" if status == "500" else ""}>500 Server Error</option>
+                            <option value="200">200 OK</option>
+                            <option value="400">400 Bad Request</option>
+                            <option value="401">401 Unauthorized</option>
+                            <option value="429">429 Too Many Requests</option>
+                            <option value="500">500 Server Error</option>
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Cron Task</label>
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-clock text-gray-400 mr-1.5"></i>Cron Task
+                        </label>
                         <input type="text" name="cron_task" value="{cron_task or ''}" placeholder="Task ID or name"
-                               class="px-3 py-2 border border-gray-300 rounded-md text-sm">
+                               class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200 placeholder-gray-400">
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Time Range</label>
-                        <select name="days" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            <option value="1" {"selected" if days == 1 else ""}>Last 24 hours</option>
-                            <option value="3" {"selected" if days == 3 else ""}>Last 3 days</option>
-                            <option value="7" {"selected" if days == 7 else ""}>Last 7 days</option>
-                            <option value="30" {"selected" if days == 30 else ""}>Last 30 days</option>
-                            <option value="90" {"selected" if days == 90 else ""}>Last 90 days</option>
-                            <option value="0" {"selected" if days == 0 else ""}>All time</option>
+                    <div class="flex-1 min-w-[150px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-calendar-alt text-gray-400 mr-1.5"></i>Time Range
+                        </label>
+                        <select name="days" class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200">
+                            <option value="1">Last 24 hours</option>
+                            <option value="3">Last 3 days</option>
+                            <option value="7">Last 7 days</option>
+                            <option value="30">Last 30 days</option>
+                            <option value="90">Last 90 days</option>
+                            <option value="0">All time</option>
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Limit</label>
-                        <select name="limit" class="px-3 py-2 border border-gray-300 rounded-md text-sm">
-                            <option value="100" {"selected" if limit == 100 else ""}>100 requests</option>
-                            <option value="500" {"selected" if limit == 500 else ""}>500 requests</option>
-                            <option value="1000" {"selected" if limit == 1000 else ""}>1000 requests</option>
-                            <option value="5000" {"selected" if limit == 5000 else ""}>5000 requests</option>
+                    <div class="flex-1 min-w-[150px]">
+                        <label class="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">
+                            <i class="fas fa-list-ul text-gray-400 mr-1.5"></i>Limit
+                        </label>
+                        <select name="limit" class="w-full px-4 py-2.5 bg-gray-50/50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all duration-200">
+                            <option value="100">100 requests</option>
+                            <option value="500">500 requests</option>
+                            <option value="1000">1000 requests</option>
+                            <option value="5000">5000 requests</option>
                         </select>
                     </div>
                     <div class="flex items-end gap-2">
-                        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                        <button type="submit" class="group px-6 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-xl font-medium text-sm shadow-md shadow-blue-500/25 hover:shadow-blue-500/35 hover:scale-105 transition-all duration-300">
                             <i class="fas fa-filter mr-2"></i>Filter
                         </button>
-                        <a href="/system-prompts" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300">
+                        <a href="/system-prompts" class="group p-2.5 bg-gray-100 text-gray-600 rounded-xl hover:bg-gray-200 transition-all duration-200" title="Reset filters">
                             <i class="fas fa-times"></i>
                         </a>
                     </div>
@@ -2341,39 +2499,59 @@ async def list_system_prompts(
             </div>
 
             <!-- Compare Selected Bar (hidden by default, shown when items selected) -->
-            <div id="compare-bar" class="fixed bottom-0 left-0 right-0 bg-blue-600 text-white p-4 shadow-lg transform translate-y-full transition-transform duration-200 z-40">
-                <div class="max-w-7xl mx-auto flex justify-between items-center">
-                    <span class="text-sm"><span id="selected-count">0</span> prompts selected</span>
+            <div id="compare-bar" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-4 rounded-2xl shadow-2xl shadow-blue-500/30 transition-all duration-300 translate-y-24 opacity-0 z-40 backdrop-blur-sm">
+                <div class="flex items-center gap-6">
+                    <div class="flex items-center gap-3">
+                        <div class="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center">
+                            <i class="fas fa-check-circle text-white"></i>
+                        </div>
+                        <span class="font-semibold"><span id="selected-count">0</span> prompts selected</span>
+                    </div>
+                    <div class="h-6 w-px bg-white/20"></div>
                     <div class="flex gap-2">
-                        <button onclick="clearSelection()" class="px-4 py-2 bg-blue-700 rounded-lg hover:bg-blue-800 text-sm">
-                            <i class="fas fa-times mr-1"></i>Clear
+                        <button onclick="clearSelection()" class="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-medium transition-all duration-200">
+                            <i class="fas fa-times mr-1.5"></i>Clear
                         </button>
-                        <button onclick="compareSelected()" class="px-4 py-2 bg-white text-blue-600 rounded-lg hover:bg-gray-100 text-sm font-semibold">
-                            <i class="fas fa-columns mr-1"></i>Compare Selected
+                        <button onclick="compareSelected()" class="px-5 py-2 bg-white text-blue-600 rounded-lg hover:bg-gray-50 text-sm font-bold shadow-lg shadow-white/20 transition-all duration-200 hover:scale-105">
+                            <i class="fas fa-columns mr-1.5"></i>Compare Now
                         </button>
                     </div>
                 </div>
             </div>
 
             <!-- System Prompts Table -->
-            <div class="bg-white rounded-lg shadow">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase w-10">
-                                <input type="checkbox" id="select-all" class="rounded border-gray-300" onclick="toggleSelectAll(this)">
-                            </th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">System Prompt</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Count</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">First Seen</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Seen</th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="bg-white divide-y divide-gray-200">
-                        {prompt_rows if prompt_rows else empty_msg}
-                    </tbody>
-                </table>
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-sm border border-gray-200/60 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider w-12 bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <div class="flex items-center justify-center">
+                                        <input type="checkbox" id="select-all" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                    </div>
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <i class="fas fa-file-code text-purple-400 mr-2"></i>System Prompt
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <i class="fas fa-hashtag text-blue-400 mr-2"></i>Count
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <i class="fas fa-calendar-check text-emerald-400 mr-2"></i>First Seen
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <i class="fas fa-clock text-amber-400 mr-2"></i>Last Seen
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider bg-gradient-to-r from-gray-50/80 to-gray-100/50 border-b border-gray-200">
+                                    <i class="fas fa-action text-gray-400 mr-2"></i>Actions
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {prompt_rows if prompt_rows else empty_msg}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Pagination -->
@@ -2410,9 +2588,11 @@ async def list_system_prompts(
             const bar = document.getElementById('compare-bar');
             document.getElementById('selected-count').textContent = selectedCount;
             if (selectedCount > 0) {
-                bar.classList.remove('translate-y-full');
+                bar.classList.remove('translate-y-24', 'opacity-0');
+                bar.classList.add('translate-y-0', 'opacity-100');
             } else {
-                bar.classList.add('translate-y-full');
+                bar.classList.add('translate-y-24', 'opacity-0');
+                bar.classList.remove('translate-y-0', 'opacity-100');
             }
         }
 
@@ -2523,10 +2703,10 @@ async def compare_system_prompts(
     # Build comparison data for chart
     chart_datasets = []
     colors = [
-        {"bg": "rgba(59, 130, 246, 0.5)", "border": "rgb(59, 130, 246)"},
-        {"bg": "rgba(34, 197, 94, 0.5)", "border": "rgb(34, 197, 94)"},
-        {"bg": "rgba(251, 146, 60, 0.5)", "border": "rgb(251, 146, 60)"},
-        {"bg": "rgba(168, 85, 247, 0.5)", "border": "rgb(168, 85, 247)"},
+        {"bg": "rgba(99, 102, 241, 0.6)", "border": "rgb(99, 102, 241)"},
+        {"bg": "rgba(34, 197, 94, 0.6)", "border": "rgb(34, 197, 94)"},
+        {"bg": "rgba(251, 146, 60, 0.6)", "border": "rgb(251, 146, 60)"},
+        {"bg": "rgba(168, 85, 247, 0.6)", "border": "rgb(168, 85, 247)"},
     ]
 
     for i, prompt in enumerate(compare_prompts):
@@ -2539,6 +2719,11 @@ async def compare_system_prompts(
             "borderWidth": 2,
             "fill": False,
             "tension": 0.4,
+            "pointRadius": 4,
+            "pointHoverRadius": 6,
+            "pointBackgroundColor": color["border"],
+            "pointBorderColor": "#fff",
+            "pointBorderWidth": 2,
         })
 
     # Build model comparison
@@ -2548,12 +2733,12 @@ async def compare_system_prompts(
 
     model_comparison_html = ""
     for model in sorted(all_models):
-        model_comparison_html += f'<div class="flex items-center justify-between py-2 border-b border-gray-100"><span class="text-sm text-gray-700">{model}</span>'
+        model_comparison_html += f'<tr class="hover:bg-gray-50/80 transition-colors duration-200"><td class="px-6 py-4 text-sm font-medium text-gray-900 flex items-center gap-2"><i class="fas fa-microchip text-gray-400 text-xs"></i>{model}</td>'
         for prompt in compare_prompts:
             count = prompt["model_counts"].get(model, 0)
             pct = (count / prompt["count"] * 100) if prompt["count"] > 0 else 0
-            model_comparison_html += f'<span class="text-sm text-gray-500 w-24 text-right">{count} ({pct:.0f}%)</span>'
-        model_comparison_html += '</div>'
+            model_comparison_html += f'<td class="px-6 py-4 text-sm text-gray-600 text-right">{count} <span class="text-gray-400 font-mono text-xs">({pct:.0f}%)</span></td>'
+        model_comparison_html += '</tr>'
 
     # Escape content for display
     for prompt in compare_prompts:
@@ -2592,47 +2777,104 @@ async def compare_system_prompts(
 
     main_content = f"""
             <!-- Back Link -->
-            <div class="mb-4">
-                <a href="/system-prompts" class="text-sm text-blue-600 hover:text-blue-800">
-                    <i class="fas fa-arrow-left mr-1"></i>Back to System Prompts
+            <div class="mb-6">
+                <a href="/system-prompts" class="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors duration-200 group">
+                    <i class="fas fa-arrow-left mr-1 text-gray-400 group-hover:text-gray-600"></i>
+                    <span class="font-medium">Back to System Prompts</span>
                 </a>
             </div>
 
             <!-- Header -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h1 class="text-2xl font-bold text-gray-900">
-                    <i class="fas fa-columns text-purple-500 mr-2"></i>Compare System Prompts
-                </h1>
-                <p class="text-sm text-gray-500 mt-1">Comparing {len(compare_prompts)} prompts</p>
+            <div class="bg-gradient-to-br from-white via-gray-50/50 to-purple-50/30 rounded-2xl shadow-lg shadow-purple-500/10 border border-gray-200/60 p-8 mb-8">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <div class="flex items-center gap-3 mb-2">
+                            <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-purple-500/30">
+                                <i class="fas fa-columns text-white text-lg"></i>
+                            </div>
+                            <h1 class="text-2xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">Compare System Prompts</h1>
+                        </div>
+                        <p class="text-sm text-gray-500 ml-15">Side-by-side analysis of {len(compare_prompts)} prompts</p>
+                    </div>
+                    <div class="flex items-center gap-2 px-4 py-2 bg-white/60 backdrop-blur-sm rounded-xl border border-gray-200/60">
+                        <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                        <span class="text-sm font-medium text-gray-700">Live Comparison</span>
+                    </div>
+                </div>
             </div>
 
             <!-- Prompt Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
     """
 
     for i, prompt in enumerate(compare_prompts):
         main_content += f"""
-                <div class="bg-white rounded-lg shadow p-4 border-2 border-purple-200">
-                    <div class="flex justify-between items-start mb-2">
-                        <h3 class="text-lg font-semibold text-gray-800">Prompt {i + 1}</h3>
-                        <span class="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-mono">{prompt['hash'][:8]}</span>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 hover:border-purple-300/50 overflow-hidden relative">
+                    <!-- Gradient corner decoration -->
+                    <div class="absolute top-0 right-0 w-20 h-20 bg-gradient-to-br from-purple-500/10 to-indigo-500/10 rounded-bl-full"></div>
+
+                    <div class="flex justify-between items-start mb-4 relative">
+                        <div class="flex items-center gap-2">
+                            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-md shadow-purple-500/25">
+                                <span class="text-white font-bold text-sm">{i + 1}</span>
+                            </div>
+                            <h3 class="text-lg font-bold text-gray-800">Prompt {i + 1}</h3>
+                        </div>
+                        <span class="px-3 py-1.5 bg-gradient-to-r from-purple-100 to-indigo-100 text-purple-700 rounded-lg text-xs font-mono font-medium border border-purple-200/60">
+                            {prompt['hash'][:8]}
+                        </span>
                     </div>
-                    <div class="space-y-2 mb-3">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-500">Occurrences</span>
-                            <span class="font-semibold text-blue-600">{prompt['count']}</span>
+
+                    <!-- Stats Grid -->
+                    <div class="grid grid-cols-2 gap-3 mb-4">
+                        <div class="bg-gradient-to-br from-blue-50 to-indigo-50/50 rounded-xl p-3 border border-blue-100/60">
+                            <div class="flex items-center gap-1.5 mb-1">
+                                <i class="fas fa-chart-bar text-blue-500 text-xs"></i>
+                                <span class="text-xs text-gray-500 font-medium">Occurrences</span>
+                            </div>
+                            <div class="text-xl font-bold text-blue-600">{prompt['count']:,}</div>
                         </div>
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-500">First Seen</span>
-                            <span class="text-gray-900">{prompt['first_seen_str']}</span>
-                        </div>
-                        <div class="flex justify-between text-sm">
-                            <span class="text-gray-500">Last Seen</span>
-                            <span class="text-gray-900">{prompt['last_seen_str']} ({prompt['days_ago']})</span>
+                        <div class="bg-gradient-to-br from-green-50 to-emerald-50/50 rounded-xl p-3 border border-green-100/60">
+                            <div class="flex items-center gap-1.5 mb-1">
+                                <i class="fas fa-clock text-green-500 text-xs"></i>
+                                <span class="text-xs text-gray-500 font-medium">Days Active</span>
+                            </div>
+                            <div class="text-xl font-bold text-green-600">{len(prompt['daily_counts'])}</div>
                         </div>
                     </div>
-                    <div class="bg-gray-50 rounded p-3 border border-gray-200">
-                        <pre class="text-xs text-gray-700 whitespace-pre-wrap overflow-x-auto" style="max-height: 200px; overflow-y: auto;">{prompt['content_escaped'][:500]}{'...' if len(prompt['content']) > 500 else ''}</pre>
+
+                    <div class="space-y-2 mb-4">
+                        <div class="flex items-center justify-between p-2 bg-gray-50/50 rounded-lg hover:bg-gray-100/50 transition-colors duration-200">
+                            <div class="flex items-center gap-2">
+                                <i class="fas fa-calendar-check text-gray-400 text-xs"></i>
+                                <span class="text-xs text-gray-500 font-medium">First Seen</span>
+                            </div>
+                            <span class="text-sm font-semibold text-gray-900">{prompt['first_seen_str']}</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-50/50 rounded-lg hover:bg-gray-100/50 transition-colors duration-200">
+                            <div class="flex items-center gap-2">
+                                <i class="fas fa-calendar text-gray-400 text-xs"></i>
+                                <span class="text-xs text-gray-500 font-medium">Last Seen</span>
+                            </div>
+                            <span class="text-sm font-semibold text-gray-900">{prompt['last_seen_str']}</span>
+                        </div>
+                        <div class="flex items-center justify-between p-2 bg-gray-50/50 rounded-lg hover:bg-gray-100/50 transition-colors duration-200">
+                            <div class="flex items-center gap-2">
+                                <i class="fas fa-history text-gray-400 text-xs"></i>
+                                <span class="text-xs text-gray-500 font-medium">Recent</span>
+                            </div>
+                            <span class="text-xs font-medium text-gray-600">{prompt['days_ago']}</span>
+                        </div>
+                    </div>
+
+                    <div class="relative">
+                        <div class="flex items-center gap-2 mb-2">
+                            <i class="fas fa-file-code text-gray-400 text-xs"></i>
+                            <span class="text-xs font-medium text-gray-500">Preview (first 500 chars)</span>
+                        </div>
+                        <div class="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-xl p-4 border border-gray-200/60 max-h-48 overflow-y-auto custom-scrollbar">
+                            <pre class="text-xs text-gray-700 whitespace-pre-wrap font-mono leading-relaxed">{prompt['content_escaped'][:500]}{'...' if len(prompt['content']) > 500 else ''}</pre>
+                        </div>
                     </div>
                 </div>
         """
@@ -2641,34 +2883,51 @@ async def compare_system_prompts(
             </div>
 
             <!-- Usage Comparison Chart -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                    <i class="fas fa-chart-line text-blue-500 mr-2"></i>Daily Usage Comparison
-                </h3>
-                <div class="h-80" style="position:relative;">
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-blue-500/10 border border-gray-200/60 p-8 mb-8">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                            <i class="fas fa-chart-line text-white text-sm"></i>
+                        </div>
+                        <h3 class="text-lg font-bold text-gray-800">Daily Usage Comparison</h3>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs text-gray-500">
+                        <span class="flex items-center gap-1">
+                            <span class="w-3 h-3 rounded-full bg-blue-500"></span> Line Chart
+                        </span>
+                    </div>
+                </div>
+                <div class="h-80 relative">
                     <canvas id="compareChart"></canvas>
                 </div>
             </div>
 
             <!-- Model Distribution Comparison -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                    <i class="fas fa-chart-pie text-green-500 mr-2"></i>Model Distribution Comparison
-                </h3>
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-green-500/10 border border-gray-200/60 p-8 mb-8">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                            <i class="fas fa-chart-pie text-white text-sm"></i>
+                        </div>
+                        <h3 class="text-lg font-bold text-gray-800">Model Distribution Comparison</h3>
+                    </div>
+                </div>
                 <div class="overflow-x-auto">
                     <table class="min-w-full">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
+                        <thead>
+                            <tr class="border-b-2 border-gray-200">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-microchip text-gray-400"></i>Model
+                                </th>
     """
 
     for i, prompt in enumerate(compare_prompts):
-        main_content += f'<th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Prompt {i + 1}</th>'
+        main_content += f'<th class="px-6 py-4 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Prompt {i + 1}</th>'
 
     main_content += f"""
                             </tr>
                         </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                        <tbody class="bg-white divide-y divide-gray-100">
     """ + model_comparison_html + f"""
                         </tbody>
                     </table>
@@ -2676,26 +2935,31 @@ async def compare_system_prompts(
             </div>
 
             <!-- Prompt Content Diff -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                    <i class="fas fa-code-diff text-orange-500 mr-2"></i>Prompt Content Diff
-                </h3>
-                <div class="bg-gray-50 rounded-lg border border-gray-200 p-4 max-h-96 overflow-y-auto">
-                    {diff_html}
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-orange-500/10 border border-gray-200/60 p-8 mb-8">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center shadow-md shadow-orange-500/25">
+                            <i class="fas fa-code-diff text-white text-sm"></i>
+                        </div>
+                        <h3 class="text-lg font-bold text-gray-800">Prompt Content Diff</h3>
+                    </div>
+                    <div class="flex gap-3">
+                        <div class="flex items-center gap-1.5 px-3 py-1.5 bg-green-50 rounded-lg border border-green-100">
+                            <span class="w-2.5 h-2.5 rounded bg-green-100 border-l-2 border-green-500"></span>
+                            <span class="text-xs font-medium text-gray-600">Added</span>
+                        </div>
+                        <div class="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 rounded-lg border border-red-100">
+                            <span class="w-2.5 h-2.5 rounded bg-red-100 border-l-2 border-red-500"></span>
+                            <span class="text-xs font-medium text-gray-600">Removed</span>
+                        </div>
+                        <div class="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 rounded-lg border border-gray-100">
+                            <span class="w-2.5 h-2.5 rounded bg-gray-200"></span>
+                            <span class="text-xs font-medium text-gray-600">Unchanged</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="mt-3 flex gap-4 text-xs">
-                    <div class="flex items-center gap-1">
-                        <span class="w-3 h-3 bg-green-100 border-l-4 border-green-500"></span>
-                        <span class="text-gray-600">Added (Prompt 2)</span>
-                    </div>
-                    <div class="flex items-center gap-1">
-                        <span class="w-3 h-3 bg-red-100 border-l-4 border-red-500"></span>
-                        <span class="text-gray-600">Removed (from Prompt 1)</span>
-                    </div>
-                    <div class="flex items-center gap-1">
-                        <span class="w-3 h-3 bg-gray-50"></span>
-                        <span class="text-gray-600">Unchanged</span>
-                    </div>
+                <div class="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-xl border border-gray-200/60 p-4 max-h-96 overflow-y-auto custom-scrollbar font-mono text-sm">
+                    {diff_html}
                 </div>
             </div>
     """
@@ -2710,15 +2974,53 @@ async def compare_system_prompts(
         "options": {
             "responsive": True,
             "maintainAspectRatio": False,
-            "plugins": {"legend": {"position": "top"}},
-            "scales": {"x": {"grid": {"display": False}}, "y": {"beginAtZero": True, "ticks": {"stepSize": 1}}},
+            "plugins": {
+                "legend": {
+                    "position": "top",
+                    "labels": {
+                        "color": "rgb(100, 116, 139)",
+                        "font": {"size": 12},
+                        "padding": 15,
+                        "usePointStyle": True,
+                        "pointStyle": "circle",
+                    }
+                },
+                "tooltip": {
+                    "backgroundColor": "rgba(15, 23, 42, 0.9)",
+                    "titleColor": "rgb(255, 255, 255)",
+                    "bodyColor": "rgb(255, 255, 255)",
+                    "padding": 12,
+                    "cornerRadius": 8,
+                    "displayColors": True,
+                    "mode": "index",
+                    "intersect": False,
+                }
+            },
+            "scales": {
+                "x": {
+                    "grid": {"display": False},
+                    "ticks": {"color": "rgb(100, 116, 139)", "font": {"size": 11}}
+                },
+                "y": {
+                    "beginAtZero": True,
+                    "ticks": {
+                        "stepSize": 1,
+                        "color": "rgb(100, 116, 139)",
+                        "font": {"size": 11}
+                    },
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"}
+                }
+            },
         },
     }
 
     chart_head = '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'
+    # Escape </script> in JSON to avoid HTML parsing issues
+    chart_config_json = json.dumps(compare_config)
+    chart_config_json = chart_config_json.replace("</", "<\\/")
     chart_footer = f"""
         <script>
-            window._compareChartConfig = {json.dumps(compare_config).replace("</", "<\\/")};
+            window._compareChartConfig = {chart_config_json};
             function initCompareChart() {{
                 if (typeof Chart === "undefined") {{ window.setTimeout(initCompareChart, 80); return; }}
                 var el = document.getElementById("compareChart");
@@ -2817,110 +3119,203 @@ async def view_system_prompt_detail(
 
     # Model distribution HTML
     model_dist_html = "".join([
-        f'<div class="flex items-center justify-between py-2 border-b border-gray-100">'
-        f'<span class="text-sm text-gray-700">{model}</span>'
-        f'<span class="text-sm font-semibold text-gray-900">{count} ({count/prompt_info["count"]*100:.1f}%)</span>'
+        f'<div class="group flex items-center justify-between p-3 bg-gradient-to-r from-gray-50/50 to-transparent rounded-xl hover:bg-gray-50 transition-all duration-200 border border-transparent hover:border-gray-100">'
+        f'<div class="flex items-center gap-2">'
+        f'<i class="fas fa-microchip text-gray-400 text-xs"></i>'
+        f'<span class="text-sm font-medium text-gray-700">{model}</span>'
+        f'</div>'
+        f'<div class="flex items-center gap-3">'
+        f'<span class="text-sm font-bold text-gray-900">{count}</span>'
+        f'<span class="text-xs font-mono text-gray-500 bg-gray-100 px-2 py-1 rounded">{count/prompt_info["count"]*100:.1f}%</span>'
+        f'</div>'
         f'</div>'
         for model, count in model_dist
     ])
 
     main_content = f"""
             <!-- Back Link -->
-            <div class="mb-4">
-                <a href="/system-prompts" class="text-sm text-blue-600 hover:text-blue-800">
-                    <i class="fas fa-arrow-left mr-1"></i>Back to System Prompts
+            <div class="mb-6">
+                <a href="/system-prompts" class="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 transition-colors duration-200 group">
+                    <i class="fas fa-arrow-left mr-1 text-gray-400 group-hover:text-gray-600"></i>
+                    <span class="font-medium">Back to System Prompts</span>
                 </a>
             </div>
 
             <!-- Prompt Content Card -->
-            <div class="bg-white rounded-lg shadow p-6 mb-6">
-                <div class="flex justify-between items-start mb-4">
-                    <h1 class="text-2xl font-bold text-gray-900">
-                        <i class="fas fa-file-code text-purple-500 mr-2"></i>System Prompt Details
-                    </h1>
-                    <span class="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-xs font-mono">
+            <div class="bg-gradient-to-br from-white via-gray-50/50 to-purple-50/30 rounded-2xl shadow-lg shadow-purple-500/10 border border-gray-200/60 p-8 mb-8">
+                <div class="flex justify-between items-start mb-6">
+                    <div class="flex items-center gap-4">
+                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-xl shadow-purple-500/30">
+                            <i class="fas fa-file-code text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">System Prompt Details</h1>
+                            <p class="text-sm text-gray-500 mt-0.5">Complete prompt analysis and usage statistics</p>
+                        </div>
+                    </div>
+                    <span class="px-4 py-2 bg-gradient-to-r from-purple-100 to-indigo-100 text-purple-700 rounded-xl text-sm font-mono font-semibold border border-purple-200/60 shadow-sm">
                         {prompt_hash[:12]}
                     </span>
                 </div>
 
-                <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                    <pre class="whitespace-pre-wrap text-sm text-gray-700 overflow-x-auto">{prompt_content_escaped}</pre>
+                <div class="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-xl p-6 border border-gray-200/60 mb-6">
+                    <div class="flex items-center gap-2 mb-3">
+                        <i class="fas fa-quote-left text-purple-500 text-sm"></i>
+                        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Prompt Content</span>
+                    </div>
+                    <pre class="whitespace-pre-wrap text-sm text-gray-700 overflow-x-auto font-mono leading-relaxed custom-scrollbar">{prompt_content_escaped}</pre>
                 </div>
 
-                <div class="flex gap-6 mt-4 text-sm text-gray-500">
-                    <span><i class="fas fa-signal text-blue-500 mr-1"></i>Length: {len(prompt_info["content"])} characters</span>
-                    <span><i class="fas fa-clock text-green-500 mr-1"></i>First seen: {prompt_info["first_seen"].strftime("%Y-%m-%d %H:%M:%S")}</span>
-                    <span><i class="fas fa-calendar text-yellow-500 mr-1"></i>Last seen: {prompt_info["last_seen"].strftime("%Y-%m-%d %H:%M:%S")}</span>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div class="flex items-center gap-3 p-3 bg-white/60 backdrop-blur-sm rounded-xl border border-gray-200/60">
+                        <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                            <i class="fas fa-ruler text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <div class="text-xs text-gray-500 font-medium">Length</div>
+                            <div class="text-lg font-bold text-gray-900">{len(prompt_info["content"])} chars</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3 p-3 bg-white/60 backdrop-blur-sm rounded-xl border border-gray-200/60">
+                        <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                            <i class="fas fa-clock text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <div class="text-xs text-gray-500 font-medium">First Seen</div>
+                            <div class="text-sm font-bold text-gray-900">{prompt_info["first_seen"].strftime("%Y-%m-%d %H:%M")}</div>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3 p-3 bg-white/60 backdrop-blur-sm rounded-xl border border-gray-200/60">
+                        <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-md shadow-amber-500/25">
+                            <i class="fas fa-calendar text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <div class="text-xs text-gray-500 font-medium">Last Seen</div>
+                            <div class="text-sm font-bold text-gray-900">{prompt_info["last_seen"].strftime("%Y-%m-%d %H:%M")}</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <!-- Statistics Grid -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Total Occurrences</div>
-                    <div class="text-2xl font-bold text-blue-600">{prompt_info["count"]}</div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-blue-500/10 to-indigo-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                            <i class="fas fa-chart-bar text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Total Occurrences</span>
+                    </div>
+                    <div class="text-3xl font-bold text-blue-600 relative">{prompt_info["count"]:,}</div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Days Active</div>
-                    <div class="text-2xl font-bold text-gray-900">{len(prompt_info["daily_counts"])}</div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                            <i class="fas fa-calendar-alt text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Days Active</span>
+                    </div>
+                    <div class="text-3xl font-bold text-green-600 relative">{len(prompt_info["daily_counts"])}</div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Models Used</div>
-                    <div class="text-2xl font-bold text-gray-900">{len(prompt_info["model_counts"])}</div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-purple-500/10 to-indigo-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-md shadow-purple-500/25">
+                            <i class="fas fa-microchip text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Models Used</span>
+                    </div>
+                    <div class="text-3xl font-bold text-purple-600 relative">{len(prompt_info["model_counts"])}</div>
                 </div>
-                <div class="bg-white rounded-lg shadow p-4">
-                    <div class="text-xs text-gray-500">Avg Per Day</div>
-                    <div class="text-2xl font-bold text-gray-900">{prompt_info["count"] / max(1, len(prompt_info["daily_counts"])):.1f}</div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-md shadow-amber-500/25">
+                            <i class="fas fa-chart-line text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Avg Per Day</span>
+                    </div>
+                    <div class="text-3xl font-bold text-amber-600 relative">{prompt_info["count"] / max(1, len(prompt_info["daily_counts"])):.1f}</div>
                 </div>
             </div>
 
             <!-- Charts Grid -->
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
                 <!-- Time Distribution Chart -->
-                <div class="bg-white rounded-lg shadow p-6">
-                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                        <i class="fas fa-chart-bar text-blue-500 mr-2"></i>Daily Usage
-                    </h3>
-                    <div class="h-64" style="position:relative;">
+                <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-blue-500/10 border border-gray-200/60 p-8">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                                <i class="fas fa-chart-bar text-white text-sm"></i>
+                            </div>
+                            <h3 class="text-lg font-bold text-gray-800">Daily Usage</h3>
+                        </div>
+                    </div>
+                    <div class="h-64 relative">
                         <canvas id="dailyChart"></canvas>
                     </div>
                 </div>
 
                 <!-- Model Distribution -->
-                <div class="bg-white rounded-lg shadow p-6">
-                    <h3 class="text-lg font-semibold text-gray-800 mb-4">
-                        <i class="fas fa-chart-pie text-green-500 mr-2"></i>Model Distribution
-                    </h3>
-                    <div class="space-y-2">
+                <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-green-500/10 border border-gray-200/60 p-8">
+                    <div class="flex items-center justify-between mb-6">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                                <i class="fas fa-chart-pie text-white text-sm"></i>
+                            </div>
+                            <h3 class="text-lg font-bold text-gray-800">Model Distribution</h3>
+                        </div>
+                    </div>
+                    <div class="space-y-3 max-h-64 overflow-y-auto custom-scrollbar">
                         {model_dist_html}
                     </div>
                 </div>
             </div>
 
             <!-- Recent Requests -->
-            <div class="bg-white rounded-lg shadow mb-6">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                    <h3 class="text-lg font-semibold text-gray-800">
-                        <i class="fas fa-history text-gray-500 mr-2"></i>Recent Requests
-                    </h3>
-                    <span class="text-sm text-gray-500">Showing {len(recent_requests)} of {prompt_info["count"]} requests</span>
-                </div>
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-gray-500 to-slate-600 flex items-center justify-center shadow-md shadow-gray-500/25">
+                            <i class="fas fa-history text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-800">Recent Requests</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Showing {len(recent_requests)} of {prompt_info["count"]} requests</p>
+                        </div>
+                    </div>
                 <div class="overflow-x-auto">
-                    <table class="min-w-full divide-y divide-gray-200">
-                        <thead class="bg-gray-50">
-                            <tr>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Application</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Model</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Tokens</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Latency</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cache Read</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cron Task</th>
-                                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-clock text-gray-400 text-xs"></i>Time
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-cube text-gray-400 text-xs"></i>Application
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-microchip text-gray-400 text-xs"></i>Model
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-coins text-gray-400 text-xs"></i>Tokens
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-tachometer-alt text-gray-400 text-xs"></i>Latency
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-database text-gray-400 text-xs"></i>Cache Read
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-clock text-gray-400 text-xs"></i>Cron Task
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
                             </tr>
                         </thead>
-                        <tbody class="bg-white divide-y divide-gray-200">
+                        <tbody class="divide-y divide-gray-100">
                             {request_rows if request_rows else empty_msg}
                         </tbody>
                     </table>
@@ -2933,20 +3328,57 @@ async def view_system_prompt_detail(
         "type": "bar",
         "data": {
             "labels": sorted_dates,
-            "datasets": [{"label": "Requests", "data": daily_data, "backgroundColor": "rgba(59, 130, 246, 0.5)", "borderColor": "rgb(59, 130, 246)", "borderWidth": 1}],
+            "datasets": [{
+                "label": "Requests",
+                "data": daily_data,
+                "backgroundColor": "rgba(99, 102, 241, 0.6)",
+                "borderColor": "rgb(99, 102, 241)",
+                "borderWidth": 2,
+                "borderRadius": 6,
+                "barPercentage": 0.7,
+                "categoryPercentage": 0.8,
+            }],
         },
         "options": {
             "responsive": True,
             "maintainAspectRatio": False,
-            "plugins": {"legend": {"display": False}},
-            "scales": {"x": {"grid": {"display": False}}, "y": {"beginAtZero": True, "ticks": {"stepSize": 1}}},
+            "plugins": {
+                "legend": {"display": False},
+                "tooltip": {
+                    "backgroundColor": "rgba(15, 23, 42, 0.9)",
+                    "titleColor": "rgb(255, 255, 255)",
+                    "bodyColor": "rgb(255, 255, 255)",
+                    "padding": 12,
+                    "cornerRadius": 8,
+                    "displayColors": False,
+                }
+            },
+            "scales": {
+                "x": {
+                    "grid": {"display": False},
+                    "ticks": {"color": "rgb(100, 116, 139)", "font": {"size": 11}}
+                },
+                "y": {
+                    "beginAtZero": True,
+                    "ticks": {
+                        "stepSize": 1,
+                        "color": "rgb(100, 116, 139)",
+                        "font": {"size": 11}
+                    },
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"}
+                }
+            },
         },
     }
 
     chart_head = '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'
+    chart_head = '<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>'
+    # Escape </script> in JSON to avoid HTML parsing issues
+    chart_config_json = json.dumps(daily_config)
+    chart_config_json = chart_config_json.replace("</", "<\\/")
     chart_footer = f"""
         <script>
-            window._dailyChartConfig = {json.dumps(daily_config).replace("</", "<\\/")};
+            window._dailyChartConfig = {chart_config_json};
             function initDailyChart() {{
                 if (typeof Chart === "undefined") {{ window.setTimeout(initDailyChart, 80); return; }}
                 var el = document.getElementById("dailyChart");
@@ -2973,5 +3405,384 @@ async def view_system_prompt_detail(
         main_content,
         extra_head=chart_head,
         extra_footer_script=chart_footer,
+    )
+    return html
+
+
+@router.get("/analytics/page-views", response_class=HTMLResponse)
+async def page_views_analytics(
+    request: Request,
+    db: DbSession,
+    days: int = None,
+):
+    """Page views analytics - track visitor traffic and popular pages."""
+    from src.config import settings
+
+    if days is None:
+        days = settings.default_days
+
+    # Calculate date cutoff
+    now = datetime.now()
+    cutoff = now - timedelta(days=days) if days > 0 else datetime.min
+
+    # Get total page views
+    total_result = await db.execute(
+        select(func.count(PageView.id)).where(PageView.created_at >= cutoff)
+    )
+    total_views = total_result.scalar() or 0
+
+    # Get unique visitors (by IP)
+    unique_result = await db.execute(
+        select(func.count(func.distinct(PageView.ip_address))).where(PageView.created_at >= cutoff)
+    )
+    unique_visitors = unique_result.scalar() or 0
+
+    # Get page views by path
+    path_result = await db.execute(
+        select(
+            PageView.path,
+            PageView.page_name,
+            func.count(PageView.id).label("count"),
+            func.count(func.distinct(PageView.ip_address)).label("unique_visitors"),
+        )
+        .where(PageView.created_at >= cutoff)
+        .group_by(PageView.path, PageView.page_name)
+        .order_by(func.count(PageView.id).desc())
+        .limit(20)
+    )
+    top_pages = path_result.all()
+
+    # Get daily distribution
+    daily_result = await db.execute(
+        select(
+            func.date(PageView.created_at).label("date"),
+            func.count(PageView.id).label("count"),
+        )
+        .where(PageView.created_at >= cutoff)
+        .group_by(func.date(PageView.created_at))
+        .order_by(func.date(PageView.created_at))
+    )
+    daily_counts = {str(row.date): row.count for row in daily_result.all()}
+
+    # Get recent page views
+    recent_result = await db.execute(
+        select(PageView)
+        .where(PageView.created_at >= cutoff)
+        .order_by(PageView.created_at.desc())
+        .limit(50)
+    )
+    recent_views = recent_result.scalars().all()
+
+    # Build daily distribution for chart
+    sorted_dates = sorted(daily_counts.keys())
+    daily_data = [daily_counts.get(d, 0) for d in sorted_dates]
+
+    # Generate table rows for recent views
+    def _view_row(view: PageView):
+        time_str = view.created_at.strftime("%m-%d %H:%M:%S")
+        return (
+            f'<tr class="group hover:bg-gradient-to-r hover:from-gray-50/80 hover:to-transparent transition-all duration-200">'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600 font-mono">{time_str}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs font-medium text-gray-900">{view.page_name or "Unknown"}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-blue-600 font-mono">{view.path}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-600">{view.ip_address or "-"}</td>'
+            f'<td class="px-6 py-3 whitespace-nowrap text-xs text-gray-500 max-w-xs truncate">{view.user_agent[:100] if view.user_agent else "-"}</td>'
+            f'</tr>'
+        )
+
+    recent_rows = "".join(_view_row(v) for v in recent_views)
+    empty_msg = '<tr><td colspan="5" class="px-6 py-8 text-center text-gray-500">No page views recorded</td></tr>' if not recent_rows else ""
+
+    # Time range filter options
+    time_options = [
+        (1, "Last 24h"),
+        (3, "Last 3 days"),
+        (7, "Last 7 days"),
+        (30, "Last 30 days"),
+        (90, "Last 90 days"),
+        (0, "All time"),
+    ]
+    time_filter_html = ""
+    for d, label in time_options:
+        active = d == days
+        btn_class = (
+            "px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 "
+            + ("bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-md shadow-indigo-500/25" if active
+               else "text-gray-600 hover:bg-gray-100")
+        )
+        time_filter_html += f'<a href="/analytics/page-views?days={d}" class="{btn_class}">{label}</a>'
+
+    main_content = f"""
+            <!-- Header -->
+            <div class="bg-gradient-to-br from-white via-gray-50/50 to-indigo-50/30 rounded-2xl shadow-lg shadow-indigo-500/10 border border-gray-200/60 p-8 mb-6">
+                <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-4">
+                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-xl shadow-indigo-500/30">
+                            <i class="fas fa-chart-line text-white text-xl"></i>
+                        </div>
+                        <div>
+                            <h1 class="text-2xl font-bold bg-gradient-to-r from-gray-900 to-gray-600 bg-clip-text text-transparent">Page Views Analytics</h1>
+                            <p class="text-sm text-gray-500 mt-0.5">Track visitor traffic and popular pages</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm text-gray-500 font-medium mr-2">Time Range:</span>
+                        {time_filter_html}
+                    </div>
+                    <div class="flex items-center gap-2 px-4 py-2 bg-white/60 backdrop-blur-sm rounded-xl border border-gray-200/60">
+                        <span class="text-xs text-gray-500 font-medium">Period:</span>
+                        <span class="text-sm font-bold text-gray-900">{days if days > 0 else 'All'} days</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statistics Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md shadow-indigo-500/25">
+                            <i class="fas fa-eye text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Total Views</span>
+                    </div>
+                    <div class="text-3xl font-bold text-indigo-600 relative">{total_views:,}</div>
+                </div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-green-500/10 to-emerald-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center shadow-md shadow-green-500/25">
+                            <i class="fas fa-users text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Unique Visitors</span>
+                    </div>
+                    <div class="text-3xl font-bold text-green-600 relative">{unique_visitors:,}</div>
+                </div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-blue-500/10 to-indigo-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/25">
+                            <i class="fas fa-file text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Pages Tracked</span>
+                    </div>
+                    <div class="text-3xl font-bold text-blue-600 relative">{len(top_pages)}</div>
+                </div>
+                <div class="group bg-white/80 backdrop-blur-sm rounded-2xl shadow-md hover:shadow-xl transition-all duration-300 p-6 border border-gray-200/60 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-16 h-16 bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-bl-full"></div>
+                    <div class="flex items-center gap-2 mb-2 relative">
+                        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-md shadow-amber-500/25">
+                            <i class="fas fa-calendar-alt text-white text-xs"></i>
+                        </div>
+                        <span class="text-xs text-gray-500 font-medium">Days Active</span>
+                    </div>
+                    <div class="text-3xl font-bold text-amber-600 relative">{len(daily_counts)}</div>
+                </div>
+            </div>
+
+            <!-- Daily Distribution Chart -->
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md shadow-indigo-500/25">
+                            <i class="fas fa-chart-area text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-800">Daily Traffic Trend</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Page views over time</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="p-6">
+                    <canvas id="dailyChart" height="80"></canvas>
+                </div>
+            </div>
+
+            <!-- Top Pages Table -->
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center shadow-md shadow-purple-500/25">
+                            <i class="fas fa-list text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-800">Top Pages</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Most visited pages</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Page</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Path</th>
+                                <th class="px-6 py-4 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Views</th>
+                                <th class="px-6 py-4 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">Unique</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+    """
+
+    for i, (path, page_name, count, unique) in enumerate(top_pages):
+        pct = (count / total_views * 100) if total_views > 0 else 0
+        main_content += f"""
+                <tr class="group hover:bg-gradient-to-r hover:from-gray-50/80 hover:to-transparent transition-all duration-200">
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="text-sm font-semibold text-gray-900">{page_name or path}</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <code class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-600">{path}</code>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-center">
+                        <span class="text-sm font-bold text-indigo-600">{count:,}</span>
+                        <span class="text-xs text-gray-400 ml-2">({pct:.1f}%)</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-center">
+                        <span class="text-sm text-gray-600">{unique}</span>
+                    </td>
+                </tr>
+        """
+
+    main_content += f"""
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Recent Page Views -->
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-gray-500 to-slate-600 flex items-center justify-center shadow-md shadow-gray-500/25">
+                            <i class="fas fa-clock text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-bold text-gray-800">Recent Activity</h3>
+                            <p class="text-xs text-gray-500 mt-0.5">Latest {len(recent_views)} page views</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-clock text-gray-400 text-xs"></i>Time
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-file text-gray-400 text-xs"></i>Page
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-link text-gray-400 text-xs"></i>Path
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fas fa-user text-gray-400 text-xs"></i>IP
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">User Agent</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {recent_rows if recent_rows else empty_msg}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+    """
+
+    breadcrumbs = render_breadcrumbs([
+        ("Dashboard", "/dashboard"),
+        ("Page Views", None),
+    ])
+    sidebar = render_sidebar("page-views")
+
+    # Chart.js configuration for daily distribution
+    chart_config = f"""
+    <script>
+        const dailyCtx = document.getElementById('dailyChart').getContext('2d');
+        const gradient = dailyCtx.createLinearGradient(0, 0, 0, 400);
+        gradient.addColorStop(0, 'rgba(99, 102, 241, 0.3)');
+        gradient.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+
+        new Chart(dailyCtx, {{
+            type: 'line',
+            data: {{
+                labels: {sorted_dates},
+                datasets: [{{
+                    label: 'Page Views',
+                    data: {daily_data},
+                    borderColor: 'rgb(99, 102, 241)',
+                    backgroundColor: gradient,
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 5,
+                    pointHoverRadius: 7,
+                    pointBackgroundColor: 'rgb(99, 102, 241)',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2,
+                }}],
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{
+                        display: false,
+                    }},
+                    tooltip: {{
+                        backgroundColor: 'rgba(15, 23, 42, 0.95)',
+                        titleColor: 'rgb(255, 255, 255)',
+                        bodyColor: 'rgb(255, 255, 255)',
+                        padding: 14,
+                        cornerRadius: 10,
+                        displayColors: false,
+                        titleFont: {{
+                            size: 14,
+                            weight: '600',
+                        }},
+                        bodyFont: {{
+                            size: 13,
+                        }},
+                    }},
+                }},
+                scales: {{
+                    x: {{
+                        grid: {{
+                            color: 'rgba(0, 0, 0, 0.05)',
+                        }},
+                        ticks: {{
+                            color: 'rgb(107, 114, 128)',
+                            font: {{
+                                size: 11,
+                            }},
+                        }},
+                    }},
+                    y: {{
+                        beginAtZero: true,
+                        grid: {{
+                            color: 'rgba(0, 0, 0, 0.05)',
+                        }},
+                        ticks: {{
+                            color: 'rgb(107, 114, 128)',
+                            font: {{
+                                size: 11,
+                            }},
+                        }},
+                    }},
+                }},
+            }},
+        }});
+    </script>
+    """
+
+    html = render_page(
+        "Page Views Analytics",
+        sidebar,
+        breadcrumbs,
+        main_content,
+        extra_footer_script=chart_config,
     )
     return html
