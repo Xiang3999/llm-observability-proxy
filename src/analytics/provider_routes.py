@@ -1,15 +1,16 @@
 """API routes for provider key management."""
 
-from typing import Annotated, Optional
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.database import get_db
 from src.auth.key_manager import KeyManager
 from src.auth.middleware import verify_master_key
-from src.models.provider_key import ProviderType, ProviderKey
+from src.models.database import get_db
+from src.models.provider_key import ProviderKey, ProviderType
 
 router = APIRouter(prefix="/api/provider-keys", tags=["Provider Keys"])
 
@@ -22,7 +23,7 @@ class ProviderKeyCreate(BaseModel):
     name: str
     provider: str
     api_key: str
-    base_url: Optional[str] = None
+    base_url: str | None = None
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -42,11 +43,11 @@ async def create_provider_key(
 
     try:
         provider_type = ProviderType(data.provider.lower())
-    except ValueError:
+    except ValueError as err:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid provider. Must be one of: {[p.value for p in ProviderType]}"
-        )
+        ) from err
 
     provider_key = await key_manager.create_provider_key(
         name=data.name,
@@ -71,11 +72,10 @@ async def list_provider_keys(
 ):
     """List all provider keys (without exposing the actual keys)."""
     key_manager = KeyManager(db)
-    keys = await key_manager.list_proxy_keys()  # Get all to find unique provider keys
 
     # Get unique provider keys
     result = await key_manager.db.execute(
-        select(ProviderKey).where(ProviderKey.is_active == True)
+        select(ProviderKey).where(ProviderKey.is_active)
     )
     provider_keys = list(result.scalars().all())
 

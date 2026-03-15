@@ -1,7 +1,7 @@
 """Auth-related types to avoid circular imports."""
 
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any
 
 
 class ProxyAuthResult:
@@ -12,7 +12,7 @@ class ProxyAuthResult:
         proxy_key: Any,  # ProxyKey OR SimpleNamespace with .id, .name
         provider_key: str,
         provider_type: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
     ):
         self.proxy_key = proxy_key
         self.provider_key = provider_key
@@ -25,7 +25,7 @@ class ProxyAuthResult:
 def make_cached_auth_result(
     provider_key: str,
     provider_type: str,
-    base_url: Optional[str],
+    base_url: str | None,
     proxy_key_id: str,
     app_name: str,
 ) -> ProxyAuthResult:

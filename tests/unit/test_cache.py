@@ -1,8 +1,9 @@
 """Unit tests for semantic cache."""
 
+
 import pytest
-import asyncio
-from src.cache.semantic_cache import SemanticCache, CacheResult
+
+from src.cache.semantic_cache import CacheResult, SemanticCache
 
 
 class TestSemanticCache:

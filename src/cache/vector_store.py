@@ -10,10 +10,8 @@ For production use, consider using a dedicated vector database like:
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
-import hashlib
 
 
 @dataclass
@@ -57,7 +55,7 @@ class InMemoryVectorStore:
         v2_norm = self._normalize(v2)
 
         # Dot product of normalized vectors = cosine similarity
-        similarity = sum(a * b for a, b in zip(v1_norm, v2_norm))
+        similarity = sum(a * b for a, b in zip(v1_norm, v2_norm, strict=False))
         return max(-1.0, min(1.0, similarity))  # Clamp to [-1, 1]
 
     def search(
@@ -150,7 +148,6 @@ class InMemoryVectorStore:
 
     def stats(self) -> dict:
         """Get store statistics."""
-        now = datetime.now()
         active = sum(1 for v in self.entries.values() if not v.is_expired())
         expired = len(self.entries) - active
         total_hits = sum(v.hit_count for v in self.entries.values())

@@ -5,7 +5,6 @@ KV cache with ~12h TTL). Cache key = raw bearer token; value = auth result.
 """
 
 import time
-from typing import Optional
 
 from src.auth.types import ProxyAuthResult
 
@@ -21,7 +20,7 @@ class AuthCache:
         self._max_size = max_size
         self._order: list[str] = []  # FIFO eviction
 
-    def get(self, token: str) -> Optional[ProxyAuthResult]:
+    def get(self, token: str) -> ProxyAuthResult | None:
         """Return cached auth result if present and not expired."""
         now = time.monotonic()
         entry = self._cache.get(token)

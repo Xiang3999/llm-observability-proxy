@@ -1,9 +1,8 @@
 """API Proxy handler - intercept and forward LLM API requests."""
 
-import json
-import time
-from typing import Any, AsyncGenerator, Optional
 from datetime import datetime
+from typing import Any
+
 import httpx
 
 from src.auth.middleware import ProxyAuthResult
@@ -30,8 +29,8 @@ class ProxyHandler:
         self.auth_result = auth_result
         self.recorder = recorder
         self.http_client = http_client
-        self.start_time: Optional[datetime] = None
-        self.first_token_time: Optional[datetime] = None
+        self.start_time: datetime | None = None
+        self.first_token_time: datetime | None = None
 
     async def forward_request(
         self,

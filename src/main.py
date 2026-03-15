@@ -1,21 +1,22 @@
 """Main FastAPI application."""
 
 import logging
-import structlog
 from contextlib import asynccontextmanager
+
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from src.analytics.deep_analytics import router as deep_analytics_router
+from src.analytics.provider_routes import router as provider_keys_router
+from src.analytics.request_routes import router as requests_router
+from src.analytics.routes import router as proxy_keys_router
 from src.config import settings
 from src.models.database import init_db
 from src.proxy.routes import router as proxy_router
-from src.analytics.routes import router as proxy_keys_router
-from src.analytics.provider_routes import router as provider_keys_router
-from src.analytics.request_routes import router as requests_router
-from src.analytics.deep_analytics import router as deep_analytics_router
-from src.web.routes import router as web_router
 from src.web.middleware import PageViewMiddleware
+from src.web.routes import router as web_router
 
 # Configure logging
 structlog.configure(
@@ -58,7 +59,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     # Close the global HTTP client to release connections
-    from src.proxy.routes import get_http_client, _http_client
+    from src.proxy.routes import _http_client, get_http_client
     if _http_client is not None:
         await _http_client.aclose()
         logger.info("HTTP client closed")

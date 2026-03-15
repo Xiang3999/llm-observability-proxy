@@ -1,13 +1,13 @@
 """Middleware for tracking page views."""
 
+import asyncio
+
 from fastapi import Request
 from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from datetime import datetime
-import asyncio
 
-from src.models.page_view import PageView
 from src.models.database import AsyncSessionLocal
+from src.models.page_view import PageView
 
 
 class PageViewMiddleware(BaseHTTPMiddleware):

@@ -1,23 +1,23 @@
 """Authentication middleware and dependencies."""
 
 import time
+from typing import Annotated
+
 import structlog
-from typing import Annotated, Optional
-from fastapi import HTTPException, status, Security, Depends
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import settings
-from src.auth.key_manager import KeyManager, verify_key
 from src.auth.auth_cache import AuthCache
+from src.auth.key_manager import KeyManager
 from src.auth.types import ProxyAuthResult, make_cached_auth_result
-from src.models.proxy_key import ProxyKey
+from src.config import settings
 from src.models.database import get_db
 
 logger = structlog.get_logger(__name__)
 
 # In-memory auth cache to avoid DB hit on every request (Helicone-style)
-_auth_cache: Optional[AuthCache] = None
+_auth_cache: AuthCache | None = None
 
 
 def get_auth_cache() -> AuthCache:

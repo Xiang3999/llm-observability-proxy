@@ -1,29 +1,29 @@
 """LLM API Proxy routes - Optimized for minimal latency."""
 
-import json
 import asyncio
-import logging
+import json
 import time
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import urlparse
-from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import StreamingResponse
+
 import httpx
 import structlog
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
 
-from src.auth.middleware import get_proxy_auth, ProxyAuthResult
-from src.recorder.recorder import RequestRecorder
+from src.auth.middleware import ProxyAuthResult, get_proxy_auth
 from src.cache.semantic_cache import SemanticCache
 from src.config import settings
+from src.recorder.recorder import RequestRecorder
 
 router = APIRouter(tags=["Proxy"])
 
 # Global semantic cache instance (initialized once)
-_semantic_cache: Optional[SemanticCache] = None
+_semantic_cache: SemanticCache | None = None
 
 # Global HTTP client with connection pooling for better performance
-_http_client: Optional[httpx.AsyncClient] = None
+_http_client: httpx.AsyncClient | None = None
 
 logger = structlog.get_logger(__name__)
 
@@ -76,7 +76,7 @@ PROVIDER_BASE_URLS = {
 }
 
 
-def _safe_body_for_db(obj: Optional[Dict[str, Any]]) -> dict:
+def _safe_body_for_db(obj: dict[str, Any] | None) -> dict:
     """Return a JSON-serializable copy for DB (request_body/response_body columns). Avoids serialization errors."""
     if obj is None:
         return {}
@@ -86,7 +86,7 @@ def _safe_body_for_db(obj: Optional[Dict[str, Any]]) -> dict:
         return {}
 
 
-def _sum_detail_tokens(details: dict) -> Optional[int]:
+def _sum_detail_tokens(details: dict) -> int | None:
     """Sum token fields from DashScope prompt_tokens_details or completion_tokens_details."""
     if not isinstance(details, dict):
         return None
@@ -355,7 +355,6 @@ def _parse_anthropic_stream_chunks(chunks: list[bytes]) -> dict:
     # Parse SSE format: event: and data: are on separate lines
     lines = raw.split("\n")
     current_event = None
-    current_data = None
 
     for line in lines:
         line = line.strip()
@@ -433,13 +432,13 @@ async def create_stream_request_log_async(
     proxy_key_id: str,
     path: str,
     method: str,
-    model: Optional[str],
+    model: str | None,
     provider: str,
-    body: Optional[Dict[str, Any]],
+    body: dict[str, Any] | None,
     start_time: datetime,
     status_code: int,
-    request_headers: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    request_headers: dict[str, Any] | None = None,
+) -> str | None:
     """Create request log for a stream; returns request_log id for later update when stream completes."""
     from src.models.database import AsyncSessionLocal
 
@@ -481,8 +480,9 @@ async def update_stream_response_async(
     provider: str = "openai",
 ):
     """Update an existing stream request log with reconstructed response from chunks."""
-    from src.models.database import AsyncSessionLocal
     from sqlalchemy import select
+
+    from src.models.database import AsyncSessionLocal
     from src.models.request_log import RequestLog
 
     # Parse chunks based on provider format
@@ -539,15 +539,15 @@ async def record_response_async(
     proxy_key_id: str,
     path: str,
     method: str,
-    model: Optional[str],
+    model: str | None,
     provider: str,
-    body: Optional[Dict[str, Any]],
-    body_bytes: Optional[bytes],
+    body: dict[str, Any] | None,
+    body_bytes: bytes | None,
     start_time: datetime,
     status_code: int,
     response_body: dict,
-    request_headers: Optional[Dict[str, Any]] = None,
-) -> Optional[str]:
+    request_headers: dict[str, Any] | None = None,
+) -> str | None:
     """Record response with its own DB session. Returns request_log id for later update (e.g. stream)."""
     from src.models.database import AsyncSessionLocal
 
@@ -608,8 +608,8 @@ async def proxy_request(
     has_body = request.method in ("POST", "PUT", "PATCH")
 
     # Parse body when present (needed for stream detection and cache/forward)
-    body: Optional[Dict[str, Any]] = None
-    body_bytes: Optional[bytes] = None
+    body: dict[str, Any] | None = None
+    body_bytes: bytes | None = None
     if has_body:
         body = await request.json()
     is_stream = has_body and isinstance(body, dict) and body.get("stream") is True
@@ -733,7 +733,7 @@ async def proxy_request(
             stream_timeout = max(120.0, settings.upstream_timeout_seconds)
             queue: asyncio.Queue = asyncio.Queue(maxsize=0)
             chunks_collector: list[bytes] = []
-            stream_log_id_ref: Dict[str, Optional[str]] = {"id": None}
+            stream_log_id_ref: dict[str, str | None] = {"id": None}
 
             upstream_start = time.perf_counter()
 
@@ -804,7 +804,7 @@ async def proxy_request(
             task = asyncio.create_task(stream_worker())
             try:
                 first = await asyncio.wait_for(queue.get(), timeout=stream_timeout)
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as err:
                 task.cancel()
                 elapsed_ms = (time.perf_counter() - upstream_start) * 1000
                 logger.error(
@@ -813,7 +813,7 @@ async def proxy_request(
                     timeout_s=stream_timeout,
                     elapsed_ms=round(elapsed_ms),
                 )
-                raise httpx.TimeoutException("Stream timeout")
+                raise httpx.TimeoutException("Stream timeout") from err
             if first[0] == "error":
                 return Response(
                     content=json.dumps({"error": first[1]}),

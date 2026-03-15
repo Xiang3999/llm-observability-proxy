@@ -1,7 +1,5 @@
 """Shared layout components with modern, refined aesthetic."""
 
-from typing import List, Tuple, Optional
-
 
 # Enhanced color palette and theme system
 THEME = {
@@ -33,8 +31,8 @@ def get_active_nav_class(is_active: bool) -> str:
 
 def render_sidebar(
     current_section: str,
-    app_id: Optional[str] = None,
-    app_name: Optional[str] = None,
+    app_id: str | None = None,
+    app_name: str | None = None,
 ) -> str:
     """Modern sidebar with refined aesthetics and smooth interactions."""
 
@@ -51,9 +49,6 @@ def render_sidebar(
         ("page-views", "Page Views", "fa-eye", "/analytics/page-views"),
     ]
 
-    # Determine if any analytics sub-item is active
-    is_analytics_active = current_section == "analytics"
-
     def render_nav_item(label: str, icon: str, href: str, is_active: bool, is_subitem: bool = False):
         """Render a single navigation item."""
         base_classes = "group flex items-center px-3 py-2.5 rounded-lg transition-all duration-200"
@@ -65,7 +60,7 @@ def render_sidebar(
             icon_color = "text-gray-400 group-hover:text-gray-600"
 
         indent = "ml-4 w-4" if is_subitem else "w-5"
-        active_dot = f'<span class="ml-auto w-2 h-2 rounded-full bg-blue-500"></span>' if is_active and not is_subitem else ''
+        active_dot = '<span class="ml-auto w-2 h-2 rounded-full bg-blue-500"></span>' if is_active and not is_subitem else ''
 
         return f'''
         <a href="{href}" class="{base_classes}{active_classes}">
@@ -149,7 +144,7 @@ def render_sidebar(
     """
 
 
-def render_breadcrumbs(crumbs: List[Tuple[str, Optional[str]]]) -> str:
+def render_breadcrumbs(crumbs: list[tuple[str, str | None]]) -> str:
     """Modern breadcrumbs with improved visual hierarchy."""
     parts = []
     for i, (label, url) in enumerate(crumbs):
@@ -164,7 +159,7 @@ def render_breadcrumbs(crumbs: List[Tuple[str, Optional[str]]]) -> str:
         elif url:
             parts.append(f'''
             <a href="{url}" class="flex items-center text-gray-500 hover:text-gray-700 transition-colors duration-200 font-medium text-sm group">
-                {f'<i class="fas fa-chevron-right text-gray-300 mx-2 text-xs"></i>' if i > 0 else ''}
+                {'<i class="fas fa-chevron-right text-gray-300 mx-2 text-xs"></i>' if i > 0 else ''}
                 <span class="group-hover:text-gray-900">{label}</span>
             </a>
             ''')

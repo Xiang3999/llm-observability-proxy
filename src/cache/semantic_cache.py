@@ -19,13 +19,12 @@ Usage:
 """
 
 import asyncio
+import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
-import hashlib
 
-from .vector_store import InMemoryVectorStore, VectorEntry
-from .embedding import get_embedding_generator, HashEmbeddingGenerator
+from .embedding import get_embedding_generator
+from .vector_store import InMemoryVectorStore
 
 
 @dataclass
@@ -33,8 +32,8 @@ class CacheResult:
     """Result of a cache lookup."""
 
     hit: bool  # Whether cache was hit
-    response: Optional[str] = None  # Cached response (if hit)
-    model: Optional[str] = None  # Model used for cached response
+    response: str | None = None  # Cached response (if hit)
+    model: str | None = None  # Model used for cached response
     similarity: float = 0.0  # Similarity score (if hit)
     is_exact_match: bool = False  # Whether it was an exact prompt match
 
@@ -68,7 +67,7 @@ class SemanticCache:
         self.embedding_generator = get_embedding_generator(embedding_dimensions)
 
         # Exact-match fast path: same prompt+model returns immediately (no embedding/vector)
-        self._exact_cache: OrderedDict[str, tuple[str, Optional[str]]] = OrderedDict()
+        self._exact_cache: OrderedDict[str, tuple[str, str | None]] = OrderedDict()
         self._exact_max_size = min(10_000, max_size)
 
         # Stats
@@ -115,7 +114,7 @@ class SemanticCache:
     async def get(
         self,
         messages: list[dict],
-        model: Optional[str] = None
+        model: str | None = None
     ) -> CacheResult:
         """Try to get a cached response.
 
@@ -178,7 +177,7 @@ class SemanticCache:
         self,
         messages: list[dict],
         response: str,
-        model: Optional[str] = None
+        model: str | None = None
     ) -> bool:
         """Cache a response.
 

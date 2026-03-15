@@ -1,7 +1,9 @@
 """Unit tests for vector store."""
 
-import pytest
 import time
+
+import pytest
+
 from src.cache.vector_store import InMemoryVectorStore, VectorEntry
 
 
@@ -214,7 +216,7 @@ class TestVectorEntry:
 
     def test_is_expired_false(self):
         """Test that entry is not expired."""
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         entry = VectorEntry(
             id="test-1",

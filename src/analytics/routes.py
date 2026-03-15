@@ -1,14 +1,14 @@
 """API routes for proxy key management."""
 
-from typing import Annotated, Optional
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.database import get_db
 from src.auth.key_manager import KeyManager
 from src.auth.middleware import verify_master_key
-from src.models.provider_key import ProviderType
+from src.models.database import get_db
 
 router = APIRouter(prefix="/api/proxy-keys", tags=["Proxy Keys"])
 
@@ -62,7 +62,7 @@ async def create_proxy_key(
 @router.get("")
 async def list_proxy_keys(
     db: DbSession,
-    provider_key_id: Optional[str] = None,
+    provider_key_id: str | None = None,
     _: str = Depends(verify_master_key)
 ):
     """List all proxy keys."""

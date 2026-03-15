@@ -1,17 +1,15 @@
 """Unit tests for web helper functions."""
 
-import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
 from src.web.routes import (
-    get_prompt_hash,
-    extract_cron_task_info,
-    get_cache_read_info,
-    extract_system_prompts,
     calculate_daily_distribution,
+    extract_cron_task_info,
+    extract_system_prompts,
+    get_cache_read_info,
+    get_prompt_hash,
 )
-from src.models.request_log import RequestLog
 
 
 class TestPromptHash:

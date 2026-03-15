@@ -1,21 +1,27 @@
 """Web Dashboard routes."""
 
 import re
-from typing import Annotated, Optional, List, Dict
-from fastapi import APIRouter, Request, Depends, HTTPException, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 from datetime import datetime, timedelta
+from typing import Annotated
 
-from src.models.database import get_db
-from src.models.request_log import RequestLog
-from src.models.proxy_key import ProxyKey
-from src.models.provider_key import ProviderKey, ProviderType
-from src.models.page_view import PageView
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.auth.key_manager import KeyManager
 from src.config import settings
-from src.web.layout import render_sidebar, render_breadcrumbs, render_app_tabs, render_page
+from src.models.database import get_db
+from src.models.page_view import PageView
+from src.models.provider_key import ProviderKey, ProviderType
+from src.models.proxy_key import ProxyKey
+from src.models.request_log import RequestLog
+from src.web.layout import (
+    render_app_tabs,
+    render_breadcrumbs,
+    render_page,
+    render_sidebar,
+)
 
 router = APIRouter(tags=["Web"])
 
@@ -23,7 +29,7 @@ router = APIRouter(tags=["Web"])
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-def extract_cron_task_info(request_body: Optional[Dict]) -> Optional[str]:
+def extract_cron_task_info(request_body: dict | None) -> str | None:
     """Extract cron task_id from request body messages.
 
     Cron messages have format: [cron:task_id Task Name] at the START of user message content.
@@ -65,8 +71,8 @@ def get_cache_read_info(request_log: RequestLog) -> str:
 
 def render_request_table_row(
     req: RequestLog,
-    proxy_names: Optional[Dict[str, str]] = None,
-    app_id: Optional[str] = None,
+    proxy_names: dict[str, str] | None = None,
+    app_id: str | None = None,
     style: str = "default",
 ) -> str:
     """
@@ -160,7 +166,7 @@ def get_prompt_hash(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
-def extract_system_prompts(requests: List[RequestLog]) -> dict:
+def extract_system_prompts(requests: list[RequestLog]) -> dict:
     """
     Extract system prompts from requests and aggregate.
 
@@ -236,7 +242,7 @@ def extract_system_prompts(requests: List[RequestLog]) -> dict:
     return result
 
 
-def calculate_daily_distribution(requests: List[RequestLog]) -> Dict[str, int]:
+def calculate_daily_distribution(requests: list[RequestLog]) -> dict[str, int]:
     """Calculate requests per day."""
     daily = {}
     for req in requests:
@@ -249,8 +255,8 @@ def calculate_daily_distribution(requests: List[RequestLog]) -> Dict[str, int]:
 async def dashboard(
     request: Request,
     db: DbSession,
-    error: Optional[str] = None,
-    success: Optional[str] = None
+    error: str | None = None,
+    success: str | None = None
 ):
     """Render the main dashboard with management features."""
     # Get summary stats
@@ -653,13 +659,13 @@ async def list_requests(
     request: Request,
     db: DbSession,
     page: int = 1,
-    app_id: Optional[str] = None,
-    model: Optional[str] = None,
-    status: Optional[str] = None,
-    cron_task: Optional[str] = None
+    app_id: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+    cron_task: str | None = None
 ):
     """List all requests with pagination and filters."""
-    from sqlalchemy import select, func
+    from sqlalchemy import func, select
 
     per_page = settings.default_per_page
     offset = (page - 1) * per_page
@@ -815,8 +821,8 @@ async def add_provider_key(
     name: str = Form(...),
     provider: str = Form(...),
     api_key: str = Form(...),
-    base_url: Optional[str] = Form(None),
-    supported_models: Optional[str] = Form(None),
+    base_url: str | None = Form(None),
+    supported_models: str | None = Form(None),
     db: DbSession = None
 ):
     """Add a new provider key from the dashboard."""
@@ -824,8 +830,8 @@ async def add_provider_key(
 
     try:
         provider_type = ProviderType(provider.lower())
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid provider: {provider}")
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=f"Invalid provider: {provider}") from err
 
     # Parse supported_models from comma-separated string to list
     models_list = None
@@ -897,10 +903,11 @@ async def toggle_proxy_key(key_id: str, db: DbSession):
 @router.get("/test-proxy/{key_id}")
 async def test_proxy_key(key_id: str, db: DbSession):
     """Test proxy key connectivity by making a simple API call."""
-    from sqlalchemy import select
-    from src.models.proxy_key import ProxyKey
-    from src.models.provider_key import ProviderKey
     import httpx
+    from sqlalchemy import select
+
+    from src.models.provider_key import ProviderKey
+    from src.models.proxy_key import ProxyKey
 
     # Get proxy key with provider info
     result = await db.execute(
@@ -988,7 +995,7 @@ async def test_proxy_key(key_id: str, db: DbSession):
                     error_data = response.json()
                     if "error" in error_data:
                         error_msg += f"+-+{str(error_data['error'])[:50]}"
-                except:
+                except Exception:
                     error_msg += f"+-+{response.text[:50]}"
                 return RedirectResponse(url=f"/dashboard?error={error_msg}", status_code=303)
     except httpx.TimeoutException:
@@ -1002,7 +1009,7 @@ async def view_request_detail(
     request_id: str,
     request: Request,
     db: DbSession,
-    from_app: Optional[str] = None,
+    from_app: str | None = None,
 ):
     """View detailed request information."""
     from sqlalchemy import select
@@ -1035,7 +1042,7 @@ async def view_request_detail(
             if len(formatted) > max_len:
                 return formatted[:max_len] + "..."
             return formatted
-        except:
+        except Exception:
             return str(data)[:max_len]
 
     def json_full(data):
@@ -1044,7 +1051,7 @@ async def view_request_detail(
         import json
         try:
             return json.dumps(data, indent=2, ensure_ascii=False)
-        except:
+        except Exception:
             return str(data)
 
     request_body_preview = json_preview(req.request_body)
@@ -1243,13 +1250,14 @@ async def view_application_analytics(
     db: DbSession,
     days: int = None,
     limit: int = None,
-    is_cron_task: Optional[str] = None,
-    cron_task: Optional[str] = None,
+    is_cron_task: str | None = None,
+    cron_task: str | None = None,
 ):
     """View detailed application analytics with prompt analysis and full request history."""
-    from sqlalchemy import select, func
     import json
     from datetime import timedelta
+
+    from sqlalchemy import select
 
     # Use config defaults if not provided
     if days is None:
@@ -1921,7 +1929,7 @@ async def view_application_analytics(
 @router.get("/applications/{app_id}", response_class=HTMLResponse)
 async def view_application_detail(app_id: str, db: DbSession):
     """View detailed application analytics and request history."""
-    from sqlalchemy import select, func
+    from sqlalchemy import select
 
     # Get proxy key info
     result = await db.execute(
@@ -2150,17 +2158,18 @@ async def view_application_detail(app_id: str, db: DbSession):
 async def list_system_prompts(
     request: Request,
     db: DbSession,
-    app_id: Optional[str] = None,
-    model: Optional[str] = None,
-    status: Optional[str] = None,
-    cron_task: Optional[str] = None,
+    app_id: str | None = None,
+    model: str | None = None,
+    status: str | None = None,
+    cron_task: str | None = None,
     days: int = None,
     limit: int = None,
     page: int = 1,
 ):
     """List all system prompts with aggregation and filters."""
-    from sqlalchemy import select, func
     import html as html_lib
+
+    from sqlalchemy import select
 
     # Use config defaults if not provided
     if days is None:
@@ -2220,10 +2229,6 @@ async def list_system_prompts(
     # Apply pagination
     total_pages = (total_unique_prompts + per_page - 1) // per_page
     paginated_prompts = sorted_prompts[offset:offset + per_page]
-
-    # Get proxy key names for display
-    proxy_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-    proxy_names = {pk.id: pk.name for pk in proxy_result.all()}
 
     # Get unique apps for filter dropdown
     apps_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
@@ -2639,8 +2644,8 @@ async def compare_system_prompts(
     request: Request,
     db: DbSession,
     prompts: str,  # Comma-separated prompt hashes
-    app_id: Optional[str] = None,
-    model: Optional[str] = None,
+    app_id: str | None = None,
+    model: str | None = None,
     days: int = None,
 ):
     """Compare multiple system prompts side by side."""
@@ -2879,7 +2884,7 @@ async def compare_system_prompts(
                 </div>
         """
 
-    main_content += f"""
+    main_content += """
             </div>
 
             <!-- Usage Comparison Chart -->
@@ -2921,10 +2926,10 @@ async def compare_system_prompts(
                                 </th>
     """
 
-    for i, prompt in enumerate(compare_prompts):
-        main_content += f'<th class="px-6 py-4 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Prompt {i + 1}</th>'
+    for _i, _prompt in enumerate(compare_prompts):
+        main_content += f'<th class="px-6 py-4 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Prompt {_i + 1}</th>'
 
-    main_content += f"""
+    main_content += """
                             </tr>
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-100">
@@ -3056,8 +3061,8 @@ async def view_system_prompt_detail(
     prompt_hash: str,
     request: Request,
     db: DbSession,
-    app_id: Optional[str] = None,
-    model: Optional[str] = None,
+    app_id: str | None = None,
+    model: str | None = None,
     days: int = None,
     limit: int = None,
 ):
@@ -3626,7 +3631,7 @@ async def page_views_analytics(
                         <tbody class="divide-y divide-gray-100">
     """
 
-    for i, (path, page_name, count, unique) in enumerate(top_pages):
+    for _i, (path, page_name, count, unique) in enumerate(top_pages):
         pct = (count / total_views * 100) if total_views > 0 else 0
         main_content += f"""
                 <tr class="group hover:bg-gradient-to-r hover:from-gray-50/80 hover:to-transparent transition-all duration-200">

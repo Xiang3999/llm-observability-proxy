@@ -1,8 +1,8 @@
 """Request recorder - record API requests and responses."""
 
-import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.request_log import RequestLog
@@ -13,18 +13,18 @@ class RequestRecorder:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.current_request: Optional[RequestLog] = None
+        self.current_request: RequestLog | None = None
 
     async def record_request_start(
         self,
         proxy_key_id: str,
         path: str,
         method: str,
-        model: Optional[str],
+        model: str | None,
         provider: str,
         body: dict[str, Any],
         start_time: datetime,
-        headers: Optional[dict[str, str]] = None
+        headers: dict[str, str] | None = None
     ) -> RequestLog:
         """Record the start of a request."""
         # Extract user_id, session_id and properties from body if present
@@ -71,7 +71,7 @@ class RequestRecorder:
         headers: dict[str, str],
         body: Any,
         end_time: datetime,
-        first_token_time: Optional[datetime] = None
+        first_token_time: datetime | None = None
     ) -> None:
         """Record the response for the current request."""
         if not self.current_request:
@@ -198,7 +198,7 @@ class RequestRecorder:
 
         await self.db.flush()
 
-    async def finalize(self) -> Optional[RequestLog]:
+    async def finalize(self) -> RequestLog | None:
         """Finalize and commit the current request."""
         if self.current_request:
             request = self.current_request

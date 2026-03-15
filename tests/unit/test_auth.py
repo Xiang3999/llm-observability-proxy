@@ -1,15 +1,10 @@
 """Unit tests for API key management."""
 
-import pytest
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-from src.auth.key_manager import (
-    generate_proxy_key,
-    hash_key,
-    verify_key,
-    KeyManager
-)
+import pytest
+
+from src.auth.key_manager import KeyManager, generate_proxy_key, hash_key, verify_key
 from src.models.provider_key import ProviderType
 
 
@@ -78,7 +73,7 @@ class TestKeyManager:
         """Test creating a provider key."""
         manager = KeyManager(mock_db)
 
-        result = await manager.create_provider_key(
+        await manager.create_provider_key(
             name="Test Key",
             provider=ProviderType.OPENAI,
             api_key="sk-test123"
@@ -98,7 +93,7 @@ class TestKeyManager:
         mock_result.scalar_one_or_none.return_value = MagicMock()
         mock_db.execute.return_value = mock_result
 
-        result = await manager.validate_proxy_key("sk-helicone-proxy-test")
+        await manager.validate_proxy_key("sk-helicone-proxy-test")
 
         # Should call execute
         mock_db.execute.assert_called_once()

@@ -1,26 +1,32 @@
 """Advanced analytics routes for deep LLM API analysis."""
 
-import re
-from typing import Annotated, Optional
-from datetime import datetime, timedelta
-from fastapi import APIRouter, Request, Depends, HTTPException
-from fastapi.responses import HTMLResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
 import json
+import re
+from datetime import datetime, timedelta
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.database import get_db
-from src.models.request_log import RequestLog
-from src.models.proxy_key import ProxyKey
 from src.models.provider_key import ProviderKey
-from src.web.layout import render_sidebar, render_breadcrumbs, render_app_tabs, render_page
+from src.models.proxy_key import ProxyKey
+from src.models.request_log import RequestLog
+from src.web.layout import (
+    render_app_tabs,
+    render_breadcrumbs,
+    render_page,
+    render_sidebar,
+)
 
 router = APIRouter(tags=["Advanced Analytics"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
-def extract_cron_task_info(request_body: Optional[dict]) -> Optional[str]:
+def extract_cron_task_info(request_body: dict | None) -> str | None:
     """Extract cron task_id from request body messages.
 
     Cron messages have format: [cron:task_id Task Name] at the START of user message content.
@@ -52,7 +58,7 @@ def extract_cron_task_info(request_body: Optional[dict]) -> Optional[str]:
     return None
 
 
-def get_tools_schema_length(request_body: Optional[dict]) -> int:
+def get_tools_schema_length(request_body: dict | None) -> int:
     """Get the character length of tools schema in request body."""
     if not request_body:
         return 0
@@ -61,7 +67,7 @@ def get_tools_schema_length(request_body: Optional[dict]) -> int:
         return 0
     try:
         return len(json.dumps(tools, ensure_ascii=False))
-    except:
+    except Exception:
         return 0
 
 
@@ -72,7 +78,7 @@ async def deep_application_analytics(
     db: DbSession,
     days: int = 7,
     limit: int = 200,
-    cron_task: Optional[str] = None
+    cron_task: str | None = None
 ):
     """Deep analytics view for analyzing LLM API communication patterns.
 
@@ -84,7 +90,6 @@ async def deep_application_analytics(
     - Tool usage patterns
     - Context window analysis
     """
-    from sqlalchemy import select
 
     # Get proxy key info
     result = await db.execute(
@@ -132,7 +137,6 @@ async def deep_application_analytics(
     # 1. Cache Metrics Analysis
     total_cache_read = sum(r.cache_read_tokens or 0 for r in all_requests)
     total_cache_creation = sum(r.cache_creation_tokens or 0 for r in all_requests)
-    total_input_tokens = sum((r.usage_breakdown or {}).get("input_tokens", 0) for r in all_requests)
 
     cache_hit_rate = (total_cache_read / (total_cache_read + total_cache_creation) * 100) \
         if (total_cache_read + total_cache_creation) > 0 else 0
@@ -257,7 +261,6 @@ async def deep_application_analytics(
 
     for req in all_requests:
         req_headers = req.request_headers or {}
-        resp_headers = req.response_headers or {}
 
         # Extract beta features from request headers
         for key in req_headers:
@@ -296,7 +299,6 @@ async def deep_application_analytics(
     # Basic stats
     total_requests = len(all_requests)
     total_tokens = sum(r.total_tokens or 0 for r in all_requests)
-    total_cost = sum(float(r.cost_usd or 0) for r in all_requests)
 
     # Precompute join() HTML to avoid f-string nesting (Python 3.9 compat)
     cch_html = "".join([

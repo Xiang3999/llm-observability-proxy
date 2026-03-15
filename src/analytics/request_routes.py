@@ -1,15 +1,16 @@
 """API routes for request logs and analytics."""
 
-from typing import Annotated, Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
 from datetime import datetime, timedelta
+from typing import Annotated
 
-from src.models.database import get_db
-from src.models.request_log import RequestLog
-from src.models.proxy_key import ProxyKey
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.auth.middleware import verify_master_key
+from src.models.database import get_db
+from src.models.proxy_key import ProxyKey
+from src.models.request_log import RequestLog
 
 router = APIRouter(prefix="/api/requests", tags=["Requests"])
 
@@ -20,17 +21,17 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 @router.get("")
 async def list_requests(
     db: DbSession,
-    proxy_key_id: Optional[str] = Query(None),
-    model: Optional[str] = Query(None),
-    status_code: Optional[int] = Query(None),
-    start_time: Optional[datetime] = Query(None),
-    end_time: Optional[datetime] = Query(None),
+    proxy_key_id: str | None = Query(None),
+    model: str | None = Query(None),
+    status_code: int | None = Query(None),
+    start_time: datetime | None = Query(None),
+    end_time: datetime | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _: str = Depends(verify_master_key)
 ):
     """List request logs with filtering."""
-    query = select(RequestLog).where(ProxyKey.is_active == True)
+    query = select(RequestLog).where(ProxyKey.is_active)
 
     # Apply filters
     if proxy_key_id:
@@ -128,8 +129,8 @@ async def get_request(
 @router.get("/stats/overview")
 async def get_stats_overview(
     db: DbSession,
-    start_time: Optional[datetime] = Query(None),
-    end_time: Optional[datetime] = Query(None),
+    start_time: datetime | None = Query(None),
+    end_time: datetime | None = Query(None),
     _: str = Depends(verify_master_key)
 ):
     """Get overall statistics."""
@@ -168,8 +169,8 @@ async def get_stats_overview(
 @router.get("/stats/by-app")
 async def get_stats_by_app(
     db: DbSession,
-    start_time: Optional[datetime] = Query(None),
-    end_time: Optional[datetime] = Query(None),
+    start_time: datetime | None = Query(None),
+    end_time: datetime | None = Query(None),
     _: str = Depends(verify_master_key)
 ):
     """Get statistics grouped by application (proxy key)."""
@@ -213,8 +214,8 @@ async def get_stats_by_app(
 @router.get("/stats/by-model")
 async def get_stats_by_model(
     db: DbSession,
-    start_time: Optional[datetime] = Query(None),
-    end_time: Optional[datetime] = Query(None),
+    start_time: datetime | None = Query(None),
+    end_time: datetime | None = Query(None),
     _: str = Depends(verify_master_key)
 ):
     """Get statistics grouped by model."""

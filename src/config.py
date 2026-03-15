@@ -1,7 +1,8 @@
 """Application configuration."""
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings
-from typing import Literal, Optional
 
 
 class Settings(BaseSettings):
@@ -24,10 +25,10 @@ class Settings(BaseSettings):
     storage_type: Literal["sqlite", "s3"] = "sqlite"
 
     # S3 configuration (if storage_type is s3)
-    s3_bucket: Optional[str] = None
-    s3_region: Optional[str] = None
-    s3_access_key: Optional[str] = None
-    s3_secret_key: Optional[str] = None
+    s3_bucket: str | None = None
+    s3_region: str | None = None
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
 
     # Semantic Cache (disabled by default)
     cache_enabled: bool = False

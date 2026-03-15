@@ -1,14 +1,12 @@
 """Integration tests for the API."""
 
+
 import pytest
-import asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 from src.main import app
-from src.models.database import init_db, engine, AsyncSessionLocal
+from src.models.database import AsyncSessionLocal, engine, init_db
 from src.models.provider_key import ProviderKey, ProviderType
-from src.models.proxy_key import ProxyKey
-from src.auth.key_manager import hash_key
 
 
 @pytest.fixture

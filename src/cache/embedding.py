@@ -10,7 +10,6 @@ For production use, replace with a real embedding model like:
 
 import hashlib
 import math
-from typing import Optional
 
 
 class HashEmbeddingGenerator:
@@ -48,7 +47,7 @@ class HashEmbeddingGenerator:
 
         return embedding
 
-    def generate_for_prompt(self, prompt: str, model: Optional[str] = None) -> list[float]:
+    def generate_for_prompt(self, prompt: str, model: str | None = None) -> list[float]:
         """Generate embedding for a chat prompt.
 
         Args:
@@ -85,14 +84,14 @@ class DummyEmbeddingGenerator:
 
         return embedding
 
-    def generate_for_prompt(self, prompt: str, model: Optional[str] = None) -> list[float]:
+    def generate_for_prompt(self, prompt: str, model: str | None = None) -> list[float]:
         """Generate embedding for a chat prompt."""
         text = f"{model}:{prompt}" if model else prompt
         return self.generate(text)
 
 
 # Default generator
-_default_generator: Optional[HashEmbeddingGenerator] = None
+_default_generator: HashEmbeddingGenerator | None = None
 
 
 def get_embedding_generator(dimensions: int = 128) -> HashEmbeddingGenerator:

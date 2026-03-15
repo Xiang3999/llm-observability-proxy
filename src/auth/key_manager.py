@@ -1,10 +1,10 @@
 """API Key management - create, validate, and manage proxy keys."""
 
 import secrets
+
 import bcrypt
-from typing import List, Optional
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.provider_key import ProviderKey, ProviderType
 from src.models.proxy_key import ProxyKey
@@ -49,8 +49,8 @@ class KeyManager:
         name: str,
         provider: ProviderType,
         api_key: str,
-        base_url: Optional[str] = None,
-        supported_models: Optional[List[str]] = None
+        base_url: str | None = None,
+        supported_models: list[str] | None = None
     ) -> ProviderKey:
         """Create a new provider key."""
         # Store the key in plaintext (for local/prod use proper encryption like Fernet)
@@ -69,14 +69,14 @@ class KeyManager:
         await self.db.refresh(provider_key)
         return provider_key
 
-    async def get_provider_key(self, key_id: str) -> Optional[ProviderKey]:
+    async def get_provider_key(self, key_id: str) -> ProviderKey | None:
         """Get a provider key by ID."""
         result = await self.db.execute(
             select(ProviderKey).where(ProviderKey.id == key_id)
         )
         return result.scalar_one_or_none()
 
-    async def get_decrypted_provider_key(self, key_id: str) -> Optional[str]:
+    async def get_decrypted_provider_key(self, key_id: str) -> str | None:
         """Get the decrypted provider key."""
         provider_key = await self.get_provider_key(key_id)
         if not provider_key:
@@ -111,12 +111,12 @@ class KeyManager:
 
         return proxy_key, plain_key
 
-    async def validate_proxy_key(self, proxy_key: str) -> Optional[ProxyKey]:
+    async def validate_proxy_key(self, proxy_key: str) -> ProxyKey | None:
         """Validate a proxy key and return the ProxyKey object."""
         result = await self.db.execute(
             select(ProxyKey).where(
                 ProxyKey.proxy_key == proxy_key,
-                ProxyKey.is_active == True
+                ProxyKey.is_active
             )
         )
         return result.scalar_one_or_none()
@@ -124,25 +124,25 @@ class KeyManager:
     async def get_proxy_key_with_provider(
         self,
         proxy_key: str
-    ) -> Optional[tuple[ProxyKey, ProviderKey]]:
+    ) -> tuple[ProxyKey, ProviderKey] | None:
         """Get proxy key with its linked provider key."""
         result = await self.db.execute(
             select(ProxyKey, ProviderKey)
             .join(ProviderKey)
             .where(
                 ProxyKey.proxy_key == proxy_key,
-                ProxyKey.is_active == True,
-                ProviderKey.is_active == True
+                ProxyKey.is_active,
+                ProviderKey.is_active
             )
         )
         return result.one_or_none()
 
     async def list_proxy_keys(
         self,
-        provider_key_id: Optional[str] = None
+        provider_key_id: str | None = None
     ) -> list[ProxyKey]:
         """List all proxy keys, optionally filtered by provider key."""
-        query = select(ProxyKey).where(ProxyKey.is_active == True)
+        query = select(ProxyKey).where(ProxyKey.is_active)
         if provider_key_id:
             query = query.where(ProxyKey.provider_key_id == provider_key_id)
         query = query.order_by(ProxyKey.created_at.desc())
