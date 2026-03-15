@@ -1,6 +1,5 @@
 """API Key management - create, validate, and manage proxy keys."""
 
-import hashlib
 import secrets
 import bcrypt
 from typing import List, Optional
