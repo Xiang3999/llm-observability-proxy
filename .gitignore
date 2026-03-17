@@ -42,6 +42,8 @@ data/*.db
 data/*.sqlite
 data/*.shm
 data/*.wal
+*.db
+!pyproject.toml
 
 # Logs
 *.log
@@ -62,3 +64,6 @@ scripts/tests/test_*.py
 
 # Claude Code local settings (may contain exposed API keys)
 .claude/
+
+# uv lock file (use uv.lock in repo root if needed)
+uv.lock
