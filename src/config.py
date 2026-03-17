@@ -1,6 +1,6 @@
 """Application configuration."""
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings
 

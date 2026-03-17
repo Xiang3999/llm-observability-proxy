@@ -41,6 +41,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up...", database=settings.database_url)
     await init_db()
     logger.info("Database initialized")
+
+    # Start the async logging queue worker
+    from src.recorder.logging_queue import LoggingQueue
+    await LoggingQueue.start_worker()
+
     # 连接预热：对常用上游建连，避免首次请求多 200–500ms 的 TCP+TLS
     prewarm = getattr(settings, "prewarm_urls", "") or ""
     if prewarm:
@@ -58,6 +63,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Shutting down...")
+    # Stop the logging queue worker
+    await LoggingQueue.stop_worker()
     # Close the global HTTP client to release connections
     from src.proxy.routes import _http_client, get_http_client
     if _http_client is not None:
