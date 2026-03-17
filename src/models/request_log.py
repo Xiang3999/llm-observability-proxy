@@ -108,6 +108,10 @@ class RequestLog(Base):
         Index("idx_request_logs_created_at", "created_at"),
         Index("idx_request_logs_model", "model"),
         Index("idx_request_logs_status", "status_code"),
+        Index("idx_request_logs_proxy_key", "proxy_key_id"),
+        Index("idx_request_logs_created_proxy", "created_at", "proxy_key_id"),
+        Index("idx_request_logs_user_id", "user_id"),
+        Index("idx_request_logs_session_id", "session_id"),
     )
 
     def __repr__(self) -> str:

@@ -259,57 +259,59 @@ async def dashboard(
     success: str | None = None
 ):
     """Render the main dashboard with management features."""
-    # Get summary stats
-    result = await db.execute(
-        select(
-            func.count(RequestLog.id).label("total_requests"),
-            func.sum(RequestLog.total_tokens).label("total_tokens"),
-            func.avg(RequestLog.total_latency_ms).label("avg_latency")
+    # Use asyncio.gather to run independent DB queries in parallel
+    import asyncio
+
+    async def get_summary_stats():
+        result = await db.execute(
+            select(
+                func.count(RequestLog.id).label("total_requests"),
+                func.sum(RequestLog.total_tokens).label("total_tokens"),
+                func.avg(RequestLog.total_latency_ms).label("avg_latency")
+            )
         )
-    )
-    row = result.one()
+        return result.one()
 
-    # Get recent requests
-    recent = await db.execute(
-        select(RequestLog)
-        .order_by(RequestLog.created_at.desc())
-        .limit(10)
-    )
-    recent_requests = recent.scalars().all()
-
-    # Get proxy key names for mapping
-    proxy_result = await db.execute(
-        select(ProxyKey.id, ProxyKey.name)
-    )
-    proxy_names = {pk.id: pk.name for pk in proxy_result.all()}
-
-    # Get apps with provider info
-    apps_result = await db.execute(
-        select(
-            ProxyKey.id,
-            ProxyKey.name,
-            ProxyKey.proxy_key,
-            ProxyKey.is_active,
-            ProxyKey.created_at,
-            ProviderKey.provider,
-            ProviderKey.name.label("provider_name"),
-            func.count(RequestLog.id).label("request_count")
+    async def get_recent_requests():
+        result = await db.execute(
+            select(RequestLog)
+            .order_by(RequestLog.created_at.desc())
+            .limit(10)
         )
-        .outerjoin(RequestLog, RequestLog.proxy_key_id == ProxyKey.id)
-        .join(ProviderKey, ProxyKey.provider_key_id == ProviderKey.id)
-        .group_by(
-            ProxyKey.id, ProxyKey.name, ProxyKey.proxy_key,
-            ProxyKey.is_active, ProxyKey.created_at, ProviderKey.provider, ProviderKey.name
-        )
-        .order_by(ProxyKey.created_at.desc())
-    )
-    apps = apps_result.all()
+        return result.scalars().all()
 
-    # Get provider keys
-    provider_result = await db.execute(
-        select(ProviderKey).order_by(ProviderKey.created_at.desc())
+    async def get_proxy_names():
+        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+        return {pk.id: pk.name for pk in result.all()}
+
+    async def get_apps():
+        result = await db.execute(
+            select(ProxyKey, ProviderKey)
+            .join(ProviderKey, ProxyKey.provider_key_id == ProviderKey.id)
+            .order_by(ProxyKey.created_at.desc())
+        )
+        return result.all()
+
+    async def get_provider_keys():
+        result = await db.execute(select(ProviderKey).order_by(ProviderKey.created_at.desc()))
+        return result.scalars().all()
+
+    async def get_request_counts():
+        result = await db.execute(
+            select(RequestLog.proxy_key_id, func.count(RequestLog.id))
+            .group_by(RequestLog.proxy_key_id)
+        )
+        return {row[0]: row[1] for row in result.all()}
+
+    # Execute all queries in parallel
+    summary_result, recent_requests, proxy_names, apps, provider_keys, request_counts = await asyncio.gather(
+        get_summary_stats(),
+        get_recent_requests(),
+        get_proxy_names(),
+        get_apps(),
+        get_provider_keys(),
+        get_request_counts(),
     )
-    provider_keys = provider_result.scalars().all()
 
     # Precompute table rows to avoid f-string nesting (Python 3.9 compat)
     provider_keys_rows = "".join([
@@ -320,28 +322,28 @@ async def dashboard(
         f'<button onclick="if(confirm(\'Delete this provider key?\')) window.location.href=\'/delete-provider/{pk.id}\'" class="text-red-600 hover:text-red-900"><i class="fas fa-trash"></i> Delete</button></td></tr>'
         for pk in provider_keys
     ])
-    def _proxy_key_row(app):
+    def _proxy_key_row(proxy_key, provider_key, request_count):
         q = chr(39)  # single quote for JS (no backslash in f-string)
-        cls = "bg-gray-50" if not app.is_active else ""
-        status_cls = "bg-green-100 text-green-800" if app.is_active else "bg-red-100 text-red-800"
-        toggle_cls = "text-green-600 hover:text-green-900" if not app.is_active else "text-yellow-600 hover:text-yellow-900"
-        toggle_txt = "Activate" if not app.is_active else "Deactivate"
+        cls = "bg-gray-50" if not proxy_key.is_active else ""
+        status_cls = "bg-green-100 text-green-800" if proxy_key.is_active else "bg-red-100 text-red-800"
+        toggle_cls = "text-green-600 hover:text-green-900" if not proxy_key.is_active else "text-yellow-600 hover:text-yellow-900"
+        toggle_txt = "Activate" if not proxy_key.is_active else "Deactivate"
         return (
             f'<tr class="{cls}"><td class="px-6 py-4 whitespace-nowrap"><div class="flex flex-col">'
-            f'<a href="/applications/{app.id}/analytics" class="text-sm font-medium text-blue-600 hover:text-blue-900" title="View Analytics">{app.name} <i class="fas fa-chart-line text-xs ml-1"></i></a>'
-            f'<a href="/applications/{app.id}/deep-analytics" class="text-xs text-purple-600 hover:text-purple-900 mt-1" title="View Deep Analytics"><i class="fas fa-flask mr-1"></i>Deep Analytics</a></div></td>'
-            f'<td class="px-6 py-4 text-sm"><div class="flex items-center gap-2"><code class="text-xs bg-gray-100 px-2 py-1 rounded">{app.proxy_key}</code>'
-            f'<button onclick="navigator.clipboard.writeText({q}{app.proxy_key}{q});alert({q}Copied!{q})" class="text-gray-400 hover:text-gray-600" title="Copy"><i class="fas fa-copy"></i></button></div></td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><div class="flex flex-col"><span class="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs inline-block w-fit mb-1">{app.provider.value}</span><span class="text-xs text-gray-400">{app.provider_name}</span></div></td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{app.request_count}</td>'
-            f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{"Active" if app.is_active else "Inactive"}</span></td>'
-            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{app.created_at.strftime("%Y-%m-%d")}</td>'
+            f'<a href="/applications/{proxy_key.id}/analytics" class="text-sm font-medium text-blue-600 hover:text-blue-900" title="View Analytics">{proxy_key.name} <i class="fas fa-chart-line text-xs ml-1"></i></a>'
+            f'<a href="/applications/{proxy_key.id}/deep-analytics" class="text-xs text-purple-600 hover:text-purple-900 mt-1" title="View Deep Analytics"><i class="fas fa-flask mr-1"></i>Deep Analytics</a></div></td>'
+            f'<td class="px-6 py-4 text-sm"><div class="flex items-center gap-2"><code class="text-xs bg-gray-100 px-2 py-1 rounded">{proxy_key.proxy_key}</code>'
+            f'<button onclick="navigator.clipboard.writeText({q}{proxy_key.proxy_key}{q});alert({q}Copied!{q})" class="text-gray-400 hover:text-gray-600" title="Copy"><i class="fas fa-copy"></i></button></div></td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><div class="flex flex-col"><span class="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs inline-block w-fit mb-1">{provider_key.provider.value}</span><span class="text-xs text-gray-400">{provider_key.name}</span></div></td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{request_count}</td>'
+            f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {status_cls}">{"Active" if proxy_key.is_active else "Inactive"}</span></td>'
+            f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{proxy_key.created_at.strftime("%Y-%m-%d")}</td>'
             f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">'
-            f'<a href="/test-proxy/{app.id}" class="text-blue-600 hover:text-blue-900 mr-3" title="Test connectivity"><i class="fas fa-plug"></i> Test</a>'
-            f'<button onclick="window.location.href={q}/toggle-proxy/{app.id}{q}" class="{toggle_cls} mr-3"><i class="fas fa-power-off"></i> {toggle_txt}</button>'
-            f'<button onclick="if(confirm({q}Delete this proxy key?{q})) window.location.href={q}/delete-proxy/{app.id}{q}" class="text-red-600 hover:text-red-900"><i class="fas fa-trash"></i> Delete</button></td></tr>'
+            f'<a href="/test-proxy/{proxy_key.id}" class="text-blue-600 hover:text-blue-900 mr-3" title="Test connectivity"><i class="fas fa-plug"></i> Test</a>'
+            f'<button onclick="window.location.href={q}/toggle-proxy/{proxy_key.id}{q}" class="{toggle_cls} mr-3"><i class="fas fa-power-off"></i> {toggle_txt}</button>'
+            f'<button onclick="if(confirm({q}Delete this proxy key?{q})) window.location.href={q}/delete-proxy/{proxy_key.id}{q}" class="text-red-600 hover:text-red-900"><i class="fas fa-trash"></i> Delete</button></td></tr>'
         )
-    proxy_keys_rows = "".join(_proxy_key_row(app) for app in apps)
+    proxy_keys_rows = "".join(_proxy_key_row(pk, provider, request_counts.get(pk.id, 0)) for pk, provider in apps)
 
     recent_requests_rows = "".join(render_request_table_row(req, proxy_names=proxy_names) for req in recent_requests)
     provider_key_options = "".join([f'<option value="{pk.id}">{pk.name} ({pk.provider.value})</option>' for pk in provider_keys])
@@ -363,7 +365,7 @@ async def dashboard(
                         <span class="text-xs font-medium text-gray-500">Requests</span>
                     </div>
                     <div class="relative">
-                        <p class="text-3xl font-bold text-gray-900">{row.total_requests or 0}</p>
+                        <p class="text-3xl font-bold text-gray-900">{summary_result.total_requests or 0}</p>
                         <p class="text-xs text-gray-500 mt-1">Total processed</p>
                     </div>
                 </div>
@@ -376,7 +378,7 @@ async def dashboard(
                         <span class="text-xs font-medium text-gray-500">Tokens</span>
                     </div>
                     <div class="relative">
-                        <p class="text-3xl font-bold text-gray-900">{row.total_tokens or 0:,}</p>
+                        <p class="text-3xl font-bold text-gray-900">{summary_result.total_tokens or 0:,}</p>
                         <p class="text-xs text-gray-500 mt-1">Total consumed</p>
                     </div>
                 </div>
@@ -389,7 +391,7 @@ async def dashboard(
                         <span class="text-xs font-medium text-gray-500">Latency</span>
                     </div>
                     <div class="relative">
-                        <p class="text-3xl font-bold text-gray-900">{int(row.avg_latency or 0)}ms</p>
+                        <p class="text-3xl font-bold text-gray-900">{int(summary_result.avg_latency or 0)}ms</p>
                         <p class="text-xs text-gray-500 mt-1">Average</p>
                     </div>
                 </div>
@@ -666,6 +668,7 @@ async def list_requests(
 ):
     """List all requests with pagination and filters."""
     from sqlalchemy import func, select
+    import asyncio
 
     per_page = settings.default_per_page
     offset = (page - 1) * per_page
@@ -689,26 +692,37 @@ async def list_requests(
     if status:
         count_query = count_query.where(RequestLog.status_code == int(status))
 
-    total_result = await db.execute(count_query)
-    total_count = total_result.scalar()
+    async def get_count():
+        result = await db.execute(count_query)
+        return result.scalar()
+
+    async def get_requests():
+        q = query.offset(offset).limit(per_page)
+        result = await db.execute(q)
+        return list(result.scalars().all())
+
+    async def get_proxy_names():
+        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+        return {pk.id: pk.name for pk in result.all()}
+
+    async def get_apps():
+        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+        return list(result.all())
+
+    async def get_models():
+        result = await db.execute(select(RequestLog.model).distinct())
+        return [m[0] for m in result.all() if m[0]]
+
+    # Execute queries in parallel
+    total_count, requests_list, proxy_names, apps, models = await asyncio.gather(
+        get_count(),
+        get_requests(),
+        get_proxy_names(),
+        get_apps(),
+        get_models(),
+    )
+
     total_pages = (total_count + per_page - 1) // per_page
-
-    # Get requests
-    query = query.offset(offset).limit(per_page)
-    result = await db.execute(query)
-    requests_list = list(result.scalars().all())
-
-    # Get proxy key names
-    proxy_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-    proxy_names = {pk.id: pk.name for pk in proxy_result.all()}
-
-    # Get unique apps for filter dropdown
-    apps_result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-    apps = list(apps_result.all())
-
-    # Get unique models for filter dropdown
-    models_result = await db.execute(select(RequestLog.model).distinct())
-    models = [m[0] for m in models_result.all() if m[0]]
 
     app_options = "".join([f'<option value="{app.id}" {"selected" if app_id == app.id else ""}>{app.name}</option>' for app in apps])
     model_options = "".join([f'<option value="{m}" {"selected" if model == m else ""}>{m}</option>' for m in models])

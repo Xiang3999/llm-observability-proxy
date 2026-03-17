@@ -24,7 +24,8 @@ class RequestRecorder:
         provider: str,
         body: dict[str, Any],
         start_time: datetime,
-        headers: dict[str, str] | None = None
+        headers: dict[str, str] | None = None,
+        request_log_id: str | None = None  # Optional pre-generated ID for streaming
     ) -> RequestLog:
         """Record the start of a request."""
         # Extract user_id, session_id and properties from body if present
@@ -41,6 +42,7 @@ class RequestRecorder:
                     properties[key.replace("helicone_property_", "")] = value
 
         request_log = RequestLog(
+            id=request_log_id,  # Use pre-generated ID if provided
             proxy_key_id=proxy_key_id,
             request_path=path,
             method=method,

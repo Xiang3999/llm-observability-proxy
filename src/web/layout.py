@@ -385,18 +385,29 @@ def render_page(
             if (backdrop) backdrop.addEventListener('click', closeSidebar);
         }})();
 
-        // Add smooth reveal animations on scroll
+        // Add smooth reveal animations on scroll - optimized for performance
         document.addEventListener('DOMContentLoaded', function() {{
+            // Only animate elements that are not immediately visible
+            // Skip animation for better perceived performance on initial load
+            const animatedElements = document.querySelectorAll('.card, .stat-card, .table-container');
+
+            // If few elements, skip animation for instant display
+            if (animatedElements.length <= 5) {{
+                animatedElements.forEach(el => el.style.opacity = '1');
+                return;
+            }}
+
             const observer = new IntersectionObserver((entries) => {{
                 entries.forEach(entry => {{
                     if (entry.isIntersecting) {{
                         entry.target.classList.add('animate-slide-up');
+                        entry.target.style.opacity = '1';
                     }}
                 }});
-            }}, {{ threshold: 0.1 }});
+            }}, {{ threshold: 0.1, rootMargin: '50px' }});
 
-            document.querySelectorAll('.card, .stat-card, .table-container').forEach(el => {{
-                el.style.opacity = '0';
+            animatedElements.forEach(el => {{
+                el.style.opacity = '1'; // Show immediately, animation class will handle the rest
                 observer.observe(el);
             }});
         }});

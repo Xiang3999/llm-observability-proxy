@@ -17,10 +17,14 @@ from src.models.database import engine
 async def create_indexes():
     """Create composite indexes for dashboard optimization."""
     indexes = [
+        # Existing composite indexes for dashboard queries
         ("idx_request_logs_app_time", "proxy_key_id", "created_at"),
         ("idx_request_logs_model_time", "model", "created_at"),
         ("idx_request_logs_status_time", "status_code", "created_at"),
         ("idx_request_logs_proxy_status_time", "proxy_key_id", "status_code", "created_at"),
+        # Additional indexes for user/session queries
+        ("idx_request_logs_user_created", "user_id", "created_at"),
+        ("idx_request_logs_session_created", "session_id", "created_at"),
     ]
 
     async with engine.connect() as conn:
@@ -29,7 +33,7 @@ async def create_indexes():
                 # Check if index already exists
                 result = await conn.execute(
                     text(f"""
-                        SELECT name FROM sqlite_master 
+                        SELECT name FROM sqlite_master
                         WHERE type='index' AND name='{index_name}'
                     """)
                 )
