@@ -1018,6 +1018,10 @@ async def test_proxy_key(key_id: str, db: DbSession):
         return RedirectResponse(url=f"/dashboard?error=Test+FAILED:+{str(e)[:50]}", status_code=303)
 
 
+# Max total chars to embed for request/response body in detail page (avoids 503 from huge responses/timeouts)
+REQUEST_DETAIL_MAX_JSON_CHARS = 1_500_000
+
+
 @router.get("/requests/{request_id}", response_class=HTMLResponse)
 async def view_request_detail(
     request_id: str,
@@ -1026,21 +1030,32 @@ async def view_request_detail(
     from_app: str | None = None,
 ):
     """View detailed request information."""
+    import json as _json
+
     from sqlalchemy import select
 
-    result = await db.execute(
-        select(RequestLog).where(RequestLog.id == request_id)
-    )
-    req = result.scalar_one_or_none()
+    try:
+        result = await db.execute(
+            select(RequestLog).where(RequestLog.id == request_id)
+        )
+        req = result.scalar_one_or_none()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error loading request: {str(e)[:200]}",
+        ) from e
 
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
 
     # Get proxy key info
-    proxy_result = await db.execute(
-        select(ProxyKey).where(ProxyKey.id == req.proxy_key_id)
-    )
-    proxy_key = proxy_result.scalar_one_or_none()
+    try:
+        proxy_result = await db.execute(
+            select(ProxyKey).where(ProxyKey.id == req.proxy_key_id)
+        )
+        proxy_key = proxy_result.scalar_one_or_none()
+    except Exception:
+        proxy_key = None
 
     # Return to previous: when user came from an app page (from_app query param)
     return_to_app_name = None
@@ -1050,9 +1065,8 @@ async def view_request_detail(
     def json_preview(data, max_len=200):
         if not data:
             return "None"
-        import json
         try:
-            formatted = json.dumps(data, indent=2, ensure_ascii=False)
+            formatted = _json.dumps(data, indent=2, ensure_ascii=False)
             if len(formatted) > max_len:
                 return formatted[:max_len] + "..."
             return formatted
@@ -1062,16 +1076,40 @@ async def view_request_detail(
     def json_full(data):
         if not data:
             return "None"
-        import json
         try:
-            return json.dumps(data, indent=2, ensure_ascii=False)
+            return _json.dumps(data, indent=2, ensure_ascii=False)
         except Exception:
             return str(data)
 
-    request_body_preview = json_preview(req.request_body)
-    request_body_full = json_full(req.request_body)
-    response_body_preview = json_preview(req.response_body)
-    response_body_full = json_full(req.response_body)
+    def safe_json_for_script(data, max_chars: int | None = None):
+        """JSON string safe to embed in <script type='application/json'> (avoid </script>). If over max_chars, embed a truncated wrapper."""
+        if data is None:
+            s = "null"
+        else:
+            try:
+                s = _json.dumps(data, ensure_ascii=False)
+            except Exception:
+                s = _json.dumps(str(data))
+        if max_chars is not None and len(s) > max_chars:
+            wrapper = {
+                "_truncated": True,
+                "_total_chars": len(s),
+                "_message": f"Body too large to display ({len(s):,} chars). First {min(50000, max_chars):,} chars shown.",
+                "preview": s[: min(50000, max_chars)],
+            }
+            s = _json.dumps(wrapper, ensure_ascii=False)
+        return s.replace("</script>", "<\\/script>").replace("</", "<\\/")
+
+    # Limit embedded JSON size to avoid huge HTML / timeouts / 503
+    half = REQUEST_DETAIL_MAX_JSON_CHARS // 2
+    try:
+        request_body_js = safe_json_for_script(req.request_body, max_chars=half)
+        response_body_js = safe_json_for_script(req.response_body, max_chars=half)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to serialize request/response body: {str(e)[:200]}",
+        ) from e
 
     props_inner = (
         f'<div class="mt-4"><span class="text-sm text-gray-500">Properties:</span><div class="mt-2 bg-gray-50 p-3 rounded text-xs"><pre>{json_full(req.properties)}</pre></div></div>'
@@ -1100,7 +1138,8 @@ async def view_request_detail(
         back_links += f'<span class="text-gray-400">|</span><a href="/applications/{proxy_key.id}" class="text-sm text-blue-600 hover:text-blue-800"><i class="fas fa-cube mr-1"></i>View in Application ({proxy_key.name})</a>'
     back_links += '</div>'
 
-    main_content = f"""
+    try:
+        main_content = f"""
             {return_previous_html}
             {back_links}
             <!-- Header -->
@@ -1178,45 +1217,41 @@ async def view_request_detail(
                 ''' if proxy_key else ''}
             </div>
 
-            <!-- Request/Response Body -->
+            <!-- Request/Response Body (collapsible JSON tree) -->
+            <script type="application/json" id="request-body-json">{request_body_js}</script>
+            <script type="application/json" id="response-body-json">{response_body_js}</script>
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
                 <!-- Request Body -->
                 <div class="bg-white rounded-lg shadow">
-                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center flex-wrap gap-2">
                         <h3 class="font-semibold text-gray-800">
                             <i class="fas fa-arrow-up text-blue-500 mr-2"></i>Request Body
                         </h3>
-                        <button onclick="toggleFullView('request')" class="text-sm text-blue-600 hover:text-blue-800">
-                            <i class="fas fa-expand"></i> Expand
-                        </button>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="jsonTreeExpandAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
+                            <span class="text-gray-300">|</span>
+                            <button type="button" onclick="jsonTreeCollapseAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
+                        </div>
                     </div>
                     <div class="p-4">
-                        <div id="request-preview" class="json-preview bg-gray-900 text-green-400 p-4 rounded text-xs overflow-auto">
-                            <pre>{request_body_preview}</pre>
-                        </div>
-                        <div id="request-full" class="hidden json-full bg-gray-900 text-green-400 p-4 rounded text-xs overflow-auto mt-4">
-                            <pre>{request_body_full}</pre>
-                        </div>
+                        <div id="request-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[600px] font-mono"></div>
                     </div>
                 </div>
 
                 <!-- Response Body -->
                 <div class="bg-white rounded-lg shadow">
-                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
+                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center flex-wrap gap-2">
                         <h3 class="font-semibold text-gray-800">
                             <i class="fas fa-arrow-down text-green-500 mr-2"></i>Response Body
                         </h3>
-                        <button onclick="toggleFullView('response')" class="text-sm text-blue-600 hover:text-blue-800">
-                            <i class="fas fa-expand"></i> Expand
-                        </button>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="jsonTreeExpandAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
+                            <span class="text-gray-300">|</span>
+                            <button type="button" onclick="jsonTreeCollapseAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
+                        </div>
                     </div>
                     <div class="p-4">
-                        <div id="response-preview" class="json-preview bg-gray-900 text-green-400 p-4 rounded text-xs overflow-auto">
-                            <pre>{response_body_preview}</pre>
-                        </div>
-                        <div id="response-full" class="hidden json-full bg-gray-900 text-green-400 p-4 rounded text-xs overflow-auto mt-4">
-                            <pre>{response_body_full}</pre>
-                        </div>
+                        <div id="response-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[600px] font-mono"></div>
                     </div>
                 </div>
             </div>
@@ -1224,38 +1259,132 @@ async def view_request_detail(
             <!-- Properties (if any) -->
             {properties_section}
     """
-    breadcrumbs = render_breadcrumbs([
-        ("Dashboard", "/dashboard"),
-        ("Requests", "/requests"),
-        (f"Request {req.id[:8]}", None),
-    ])
-    sidebar = render_sidebar("requests")
-    extra_head = """<style>
-            .json-preview { max-height: 200px; overflow-y: auto; }
-            .json-full { max-height: 600px; overflow-y: auto; }
-            pre { white-space: pre-wrap; word-wrap: break-word; }
+        breadcrumbs = render_breadcrumbs([
+            ("Dashboard", "/dashboard"),
+            ("Requests", "/requests"),
+            (f"Request {req.id[:8]}", None),
+        ])
+        sidebar = render_sidebar("requests")
+        extra_head = """<style>
+            .json-tree-container .json-node { margin: 2px 0; }
+            .json-tree-container .json-toggle { cursor: pointer; user-select: none; display: inline-block; width: 1em; color: #94a3b8; }
+            .json-tree-container .json-toggle:hover { color: #e2e8f0; }
+            .json-tree-container .json-key { color: #93c5fd; margin-right: 4px; }
+            .json-tree-container .json-str { color: #86efac; }
+            .json-tree-container .json-num { color: #fcd34d; }
+            .json-tree-container .json-bool { color: #f472b6; }
+            .json-tree-container .json-null { color: #94a3b8; }
+            .json-tree-container .json-bracket { color: #cbd5e1; }
+            .json-tree-container .json-count { color: #64748b; font-style: italic; }
+            .json-tree-container .json-children { border-left: 1px solid #475569; margin-left: 8px; padding-left: 8px; }
         </style>
         <script>
-            function toggleFullView(type) {
-                var fullEl = document.getElementById(type + '-full');
-                var previewEl = document.getElementById(type + '-preview');
-                if (fullEl.classList.contains('hidden')) {
-                    fullEl.classList.remove('hidden');
-                    previewEl.classList.add('hidden');
-                } else {
-                    fullEl.classList.add('hidden');
-                    previewEl.classList.remove('hidden');
+            function escapeHtml(s) {
+                if (s === null || s === undefined) return '';
+                var div = document.createElement('div');
+                div.textContent = String(s);
+                return div.innerHTML;
+            }
+            var _jsonTreeId = 0;
+            function nextId() { return 'jt_' + (++_jsonTreeId); }
+            function renderJsonTree(value, defaultOpen) {
+                defaultOpen = defaultOpen !== false;
+                if (value === null) return '<span class="json-null">null</span>';
+                if (value === true) return '<span class="json-bool">true</span>';
+                if (value === false) return '<span class="json-bool">false</span>';
+                if (typeof value === 'number') return '<span class="json-num">' + value + '</span>';
+                if (typeof value === 'string') return '<span class="json-str">"' + escapeHtml(value) + '"</span>';
+                if (Array.isArray(value)) {
+                    var id = nextId();
+                    var open = defaultOpen ? '' : ' style="display:none"';
+                    var icon = defaultOpen ? '&#9660;' : '&#9654;';
+                    var html = '<div class="json-node"><span class="json-toggle" data-id="' + id + '" title="Click to expand/collapse">' + icon + '</span> <span class="json-bracket">[</span> <span class="json-count">' + value.length + ' items</span>';
+                    html += '<div class="json-children" id="' + id + '"' + open + '>';
+                    value.forEach(function(item, i) {
+                        html += '<div class="json-child"><span class="json-key">' + i + '</span>: ' + renderJsonTree(item, false) + '</div>';
+                    });
+                    html += '</div></div>';
+                    return html;
+                }
+                if (typeof value === 'object') {
+                    var id = nextId();
+                    var keys = Object.keys(value);
+                    var open = defaultOpen ? '' : ' style="display:none"';
+                    var icon = defaultOpen ? '&#9660;' : '&#9654;';
+                    var html = '<div class="json-node"><span class="json-toggle" data-id="' + id + '" title="Click to expand/collapse">' + icon + '</span> <span class="json-bracket">{</span> <span class="json-count">' + keys.length + ' keys</span>';
+                    html += '<div class="json-children" id="' + id + '"' + open + '>';
+                    keys.forEach(function(k) {
+                        html += '<div class="json-child"><span class="json-key">' + escapeHtml(k) + '</span>: ' + renderJsonTree(value[k], false) + '</div>';
+                    });
+                    html += '</div></div>';
+                    return html;
+                }
+                return '';
+            }
+            function initJsonTrees() {
+                var reqEl = document.getElementById('request-body-json');
+                var resEl = document.getElementById('response-body-json');
+                var reqTree = document.getElementById('request-body-tree');
+                var resTree = document.getElementById('response-body-tree');
+                if (reqEl && reqTree) {
+                    try {
+                        var reqData = JSON.parse(reqEl.textContent);
+                        reqTree.innerHTML = renderJsonTree(reqData, true);
+                    } catch (e) {
+                        reqTree.textContent = reqEl.textContent || 'null';
+                    }
+                    bindJsonToggles(reqTree);
+                }
+                if (resEl && resTree) {
+                    try {
+                        var resData = JSON.parse(resEl.textContent);
+                        resTree.innerHTML = renderJsonTree(resData, true);
+                    } catch (e) {
+                        resTree.textContent = resEl.textContent || 'null';
+                    }
+                    bindJsonToggles(resTree);
                 }
             }
+            function bindJsonToggles(container) {
+                if (!container) return;
+                container.querySelectorAll('.json-toggle').forEach(function(el) {
+                    el.addEventListener('click', function() {
+                        var id = this.getAttribute('data-id');
+                        var child = document.getElementById(id);
+                        if (!child) return;
+                        var isHidden = child.style.display === 'none';
+                        child.style.display = isHidden ? '' : 'none';
+                        this.innerHTML = isHidden ? '&#9660;' : '&#9654;';
+                    });
+                });
+            }
+            function jsonTreeExpandAll(containerId) {
+                var c = document.getElementById(containerId);
+                if (!c) return;
+                c.querySelectorAll('.json-children').forEach(function(el) { el.style.display = ''; });
+                c.querySelectorAll('.json-toggle').forEach(function(el) { el.innerHTML = '&#9660;'; });
+            }
+            function jsonTreeCollapseAll(containerId) {
+                var c = document.getElementById(containerId);
+                if (!c) return;
+                c.querySelectorAll('.json-children').forEach(function(el) { el.style.display = 'none'; });
+                c.querySelectorAll('.json-toggle').forEach(function(el) { el.innerHTML = '&#9654;'; });
+            }
+            document.addEventListener('DOMContentLoaded', initJsonTrees);
         </script>"""
-    html = render_page(
-        f"Request Detail - {req.id[:8]}",
-        sidebar,
-        breadcrumbs,
-        main_content,
-        extra_head=extra_head,
-    )
-    return html
+        html = render_page(
+            f"Request Detail - {req.id[:8]}",
+            sidebar,
+            breadcrumbs,
+            main_content,
+            extra_head=extra_head,
+        )
+        return html
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error rendering request detail: {str(e)[:300]}",
+        ) from e
 
 
 @router.get("/applications/{app_id}/analytics", response_class=HTMLResponse)

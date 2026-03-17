@@ -277,6 +277,7 @@ async def update_stream_response_async(
     chunks: list[bytes],
     end_time: datetime,
     provider: str = "openai",
+    first_chunk_time: datetime | None = None,
 ):
     """Update an existing stream request log with reconstructed response from chunks."""
     from sqlalchemy import select
@@ -306,6 +307,11 @@ async def update_stream_response_async(
             if not log:
                 return
             log.completed_at = end_time
+            # Time to first token = from request start until first response chunk received
+            if first_chunk_time and log.created_at:
+                log.time_to_first_token_ms = int(
+                    (first_chunk_time - log.created_at).total_seconds() * 1000
+                )
             log.response_body = response_body
             if isinstance(response_body, dict):
                 usage = response_body.get("usage") or {}
@@ -346,6 +352,7 @@ async def record_response_async(
     response_body: dict,
     request_headers: dict[str, Any] | None = None,
     request_log_id: str | None = None,  # Optional pre-generated ID for streaming
+    first_token_time: datetime | None = None,  # Pass None for streaming (TTFT set in update_stream_response_async). Omit for non-streaming to use end_time.
 ) -> str | None:
     """Record response with its own DB session. Returns request_log id for later update (e.g. stream)."""
     from src.models.database import AsyncSessionLocal
@@ -373,12 +380,18 @@ async def record_response_async(
                 request_log_id=request_log_id,  # Use pre-generated ID if provided
             )
             end_time = datetime.now()
+            # Streaming (request_log_id set): use first_token_time as-is (None); TTFT set in update_stream_response_async.
+            # Non-streaming: use end_time when first_token_time not provided so TTFT = total latency.
+            if request_log_id is not None:
+                ttft = first_token_time
+            else:
+                ttft = first_token_time if first_token_time is not None else end_time
             await recorder.record_response(
                 status_code=status_code,
                 headers={},
                 body=response_body,
                 end_time=end_time,
-                first_token_time=end_time,
+                first_token_time=ttft,
             )
             req = await recorder.finalize()
             await session.commit()
@@ -547,8 +560,10 @@ async def proxy_request(
                 body_with_usage["stream_options"] = {}
             body_with_usage["stream_options"]["include_usage"] = True
 
+            first_chunk_time: datetime | None = None
+
             async def stream_worker() -> None:
-                update_task = None
+                nonlocal first_chunk_time
                 try:
                     # Send body as chunked stream (same as direct client) so upstream does not wait for one big blob
                     async with client.stream(
@@ -567,6 +582,8 @@ async def proxy_request(
                         )
                         await queue.put(("meta", resp.status_code, dict(resp.headers)))
                         async for chunk in resp.aiter_bytes():
+                            if first_chunk_time is None:
+                                first_chunk_time = datetime.now()
                             chunks_collector.append(chunk)
                             await queue.put(("chunk", chunk))
                 except Exception as e:
@@ -590,7 +607,13 @@ async def proxy_request(
                         parser_provider = "anthropic" if is_anthropic_format else auth.provider_type
                         # Fire-and-forget: don't await, let it complete asynchronously
                         asyncio.create_task(
-                            update_stream_response_async(stream_log_id, list(chunks_collector), datetime.now(), parser_provider)
+                            update_stream_response_async(
+                                stream_log_id,
+                                list(chunks_collector),
+                                datetime.now(),
+                                parser_provider,
+                                first_chunk_time=first_chunk_time,
+                            )
                         )
                     await queue.put(("done",))
                     # Don't await update task - return immediately for minimal latency
@@ -632,6 +655,7 @@ async def proxy_request(
                 status_code, resp_headers = first[1], first[2]
             # Create log entry asynchronously (fire-and-forget for minimal latency)
             # Use pre-generated stream_log_id so stream_worker can reference it
+            # For streaming, time_to_first_token_ms is set later in update_stream_response_async when first chunk is received
             asyncio.create_task(
                 record_response_async(
                     proxy_key_id=auth.proxy_key_id,
@@ -646,6 +670,7 @@ async def proxy_request(
                     response_body={"stream": True},
                     request_headers=original_headers,
                     request_log_id=stream_log_id,  # Use pre-generated ID
+                    first_token_time=None,  # Set in update_stream_response_async from first chunk time
                 )
             )
             return StreamingResponse(

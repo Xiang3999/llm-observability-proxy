@@ -218,8 +218,8 @@ COMMON_HEAD = """
             theme: {
                 extend: {
                     fontFamily: {
-                        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+                        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+                        mono: ['ui-monospace', 'SFMono-Regular', 'Consolas', 'monospace'],
                     },
                     animation: {
                         'fade-in': 'fadeIn 0.5s ease-out',
@@ -250,7 +250,7 @@ COMMON_HEAD = """
         }
     </script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        /* Google Fonts @import removed: it blocks rendering and often fails/slow (e.g. unreachable). Use system fonts above. */
 
         /* Custom scrollbar */
         ::-webkit-scrollbar {
