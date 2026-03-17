@@ -24,6 +24,7 @@ class ProviderKeyCreate(BaseModel):
     provider: str
     api_key: str
     base_url: str | None = None
+    supported_models: list[str] | None = None
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -53,7 +54,8 @@ async def create_provider_key(
         name=data.name,
         provider=provider_type,
         api_key=data.api_key,
-        base_url=data.base_url
+        base_url=data.base_url,
+        supported_models=data.supported_models
     )
 
     return {
@@ -84,6 +86,8 @@ async def list_provider_keys(
             "id": pk.id,
             "name": pk.name,
             "provider": pk.provider.value,
+            "base_url": pk.base_url,
+            "supported_models": pk.supported_models,
             "created_at": pk.created_at.isoformat(),
             # Never return the actual key
         }
@@ -98,6 +102,8 @@ async def delete_provider_key(
     _: str = Depends(verify_master_key)
 ):
     """Delete a provider key (will also deactivate linked proxy keys)."""
+    from src.auth.middleware import get_auth_cache
+
     key_manager = KeyManager(db)
     provider_key = await key_manager.get_provider_key(key_id)
 
@@ -110,4 +116,57 @@ async def delete_provider_key(
     provider_key.is_active = False
     await db.commit()
 
+    # Invalidate auth cache for this provider key
+    get_auth_cache().invalidate_by_provider_key_id(key_id)
+
     return {"message": "Provider key deleted successfully"}
+
+
+class ProviderKeyUpdate(BaseModel):
+    """Request body for updating a provider key."""
+    name: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    supported_models: list[str] | None = None
+
+
+@router.patch("/{key_id}")
+async def update_provider_key(
+    key_id: str,
+    data: ProviderKeyUpdate,
+    db: DbSession,
+    _: str = Depends(verify_master_key)
+):
+    """Update a provider key's configuration."""
+    from src.auth.middleware import get_auth_cache
+
+    key_manager = KeyManager(db)
+    provider_key = await key_manager.get_provider_key(key_id)
+
+    if not provider_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Provider key not found"
+        )
+
+    # Update fields if provided
+    if data.name is not None:
+        provider_key.name = data.name
+    if data.api_key is not None:
+        provider_key.encrypted_key = data.api_key
+    if data.base_url is not None:
+        provider_key.base_url = data.base_url
+    if data.supported_models is not None:
+        provider_key.supported_models = data.supported_models
+
+    await db.commit()
+
+    # Invalidate auth cache for this provider key
+    get_auth_cache().invalidate_by_provider_key_id(key_id)
+
+    return {
+        "id": provider_key.id,
+        "name": provider_key.name,
+        "base_url": provider_key.base_url,
+        "supported_models": provider_key.supported_models,
+    }

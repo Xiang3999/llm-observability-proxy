@@ -118,14 +118,26 @@ async def delete_proxy_key(
     _: str = Depends(verify_master_key)
 ):
     """Delete (deactivate) a proxy key."""
-    key_manager = KeyManager(db)
-    success = await key_manager.delete_proxy_key(key_id)
+    from src.auth.middleware import get_auth_cache
+    from src.models.proxy_key import ProxyKey
+    from sqlalchemy import select
 
-    if not success:
+    # Get proxy key first to invalidate cache
+    result = await db.execute(select(ProxyKey).where(ProxyKey.id == key_id))
+    proxy_key = result.scalar_one_or_none()
+
+    if not proxy_key:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Proxy key not found"
         )
+
+    # Soft delete
+    proxy_key.is_active = False
+    await db.commit()
+
+    # Invalidate auth cache for this proxy key
+    get_auth_cache().invalidate_by_proxy_key_id(key_id)
 
     return {"message": "Proxy key deleted successfully"}
 

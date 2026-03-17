@@ -12,8 +12,9 @@ from src.analytics.deep_analytics import router as deep_analytics_router
 from src.analytics.provider_routes import router as provider_keys_router
 from src.analytics.request_routes import router as requests_router
 from src.analytics.routes import router as proxy_keys_router
+from src.api.model_mapping import router as model_mapping_router
 from src.config import settings
-from src.models.database import init_db
+from src.models.database import init_db, start_maintenance_tasks, stop_maintenance_tasks
 from src.proxy.routes import router as proxy_router
 from src.web.middleware import PageViewMiddleware
 from src.web.routes import router as web_router
@@ -46,6 +47,13 @@ async def lifespan(app: FastAPI):
     from src.recorder.logging_queue import LoggingQueue
     await LoggingQueue.start_worker()
 
+    # Start database maintenance tasks (checkpoint + backup)
+    await start_maintenance_tasks(
+        checkpoint_interval=settings.db_checkpoint_interval_seconds,
+        backup_interval_hours=settings.db_backup_interval_hours,
+        backup_keep_count=settings.db_backup_keep_count,
+    )
+
     # 连接预热：对常用上游建连，避免首次请求多 200–500ms 的 TCP+TLS
     prewarm = getattr(settings, "prewarm_urls", "") or ""
     if prewarm:
@@ -63,6 +71,8 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Shutting down...")
+    # Stop database maintenance tasks
+    await stop_maintenance_tasks()
     # Stop the logging queue worker
     await LoggingQueue.stop_worker()
     # Close the global HTTP client to release connections
@@ -98,6 +108,7 @@ app.include_router(proxy_keys_router)
 app.include_router(provider_keys_router)
 app.include_router(requests_router)
 app.include_router(deep_analytics_router)
+app.include_router(model_mapping_router)
 app.include_router(web_router)
 
 

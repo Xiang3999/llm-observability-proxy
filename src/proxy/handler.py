@@ -103,6 +103,10 @@ class ProxyHandler:
 
     def _get_base_url(self) -> str:
         """Get the base URL for the provider."""
+        # Use custom base_url if configured
+        if self.auth_result.base_url:
+            return self.auth_result.base_url
+
         provider = self.auth_result.provider_type
         base_url = self.PROVIDER_BASE_URLS.get(provider)
 

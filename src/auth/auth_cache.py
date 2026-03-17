@@ -51,3 +51,25 @@ class AuthCache:
         self._cache.pop(token, None)
         if token in self._order:
             self._order.remove(token)
+
+    def invalidate_by_proxy_key_id(self, proxy_key_id: str) -> None:
+        """Remove all cache entries matching a proxy_key_id."""
+        tokens_to_remove = []
+        for token, (result, _) in self._cache.items():
+            if getattr(result, "proxy_key_id", None) == proxy_key_id:
+                tokens_to_remove.append(token)
+        for token in tokens_to_remove:
+            self.invalidate(token)
+
+    def invalidate_by_provider_key_id(self, provider_key_id: str) -> None:
+        """Remove all cache entries for proxy keys using this provider_key_id.
+
+        Note: This requires checking the DB relationship, so we clear all cache
+        to be safe. Use sparingly.
+        """
+        self.clear()
+
+    def clear(self) -> None:
+        """Clear all cache entries."""
+        self._cache.clear()
+        self._order.clear()

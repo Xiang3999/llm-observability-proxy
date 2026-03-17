@@ -26,7 +26,19 @@ _semantic_cache: SemanticCache | None = None
 # Global HTTP client with connection pooling for better performance
 _http_client: httpx.AsyncClient | None = None
 
+# Model mapping cache for Anthropic protocol (source_model -> target_model)
+# TTL: 60 seconds, to balance latency and config freshness
+_model_mapping_cache: dict[str, tuple[str, float]] = {}
+_MODEL_MAPPING_CACHE_TTL = 60.0
+
 logger = structlog.get_logger(__name__)
+
+
+def clear_model_mapping_cache():
+    """Clear the model mapping cache. Call when mappings are updated."""
+    global _model_mapping_cache
+    _model_mapping_cache.clear()
+    logger.info("model mapping cache cleared")
 
 
 def get_semantic_cache() -> SemanticCache:
@@ -74,6 +86,76 @@ async def _stream_body_chunks(body: dict):
     # separators=(',', ':') removes spaces for ~10% smaller payload
     for i in range(0, len(data), _STREAM_BODY_CHUNK_SIZE):
         yield data[i : i + _STREAM_BODY_CHUNK_SIZE]
+
+
+async def _get_mapped_model(source_model: str) -> str:
+    """Get mapped target model for Anthropic protocol only.
+
+    Supports three types of mappings (in priority order):
+    1. Exact match: "claude-3-5-sonnet" → "glm-5"
+    2. Prefix match: "claude-*" → matches any model starting with "claude-"
+    3. Wildcard: "*" → matches all unconfigured models
+
+    Uses in-memory cache with TTL to avoid DB hits on every request.
+    Returns source_model if no mapping exists.
+    """
+    global _model_mapping_cache
+
+    now = time.monotonic()
+
+    # Check cache first for exact match
+    cached = _model_mapping_cache.get(source_model)
+    if cached is not None:
+        target_model, expiry = cached
+        if now < expiry:
+            return target_model
+        # Expired, remove from cache
+        _model_mapping_cache.pop(source_model, None)
+
+    # Query database for all active mappings
+    try:
+        from sqlalchemy import select
+        from src.models.database import AsyncSessionLocal
+        from src.models.model_mapping import ModelMapping
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ModelMapping).where(ModelMapping.is_active == True)
+            )
+            all_mappings = result.scalars().all()
+
+            # Priority 1: Exact match
+            for mapping in all_mappings:
+                if mapping.source_model == source_model:
+                    _model_mapping_cache[source_model] = (mapping.target_model, now + _MODEL_MAPPING_CACHE_TTL)
+                    logger.debug("model mapping applied (exact)", source=source_model, target=mapping.target_model)
+                    return mapping.target_model
+
+            # Priority 2: Prefix match (e.g., "claude-*" matches "claude-3-5-sonnet")
+            # Sort by source_model length descending to match longest prefix first
+            prefix_mappings = [m for m in all_mappings if m.source_model.endswith("*") and m.source_model != "*"]
+            prefix_mappings.sort(key=lambda m: len(m.source_model), reverse=True)
+
+            for mapping in prefix_mappings:
+                prefix = mapping.source_model[:-1]  # Remove the "*"
+                if source_model.startswith(prefix):
+                    _model_mapping_cache[source_model] = (mapping.target_model, now + _MODEL_MAPPING_CACHE_TTL)
+                    logger.debug("model mapping applied (prefix)", source=source_model, pattern=mapping.source_model, target=mapping.target_model)
+                    return mapping.target_model
+
+            # Priority 3: Wildcard match ("*" matches everything)
+            for mapping in all_mappings:
+                if mapping.source_model == "*":
+                    _model_mapping_cache[source_model] = (mapping.target_model, now + _MODEL_MAPPING_CACHE_TTL)
+                    logger.debug("model mapping applied (wildcard)", source=source_model, target=mapping.target_model)
+                    return mapping.target_model
+
+    except Exception as e:
+        logger.warning("model mapping lookup failed", error=str(e))
+
+    # No mapping found, cache the negative result
+    _model_mapping_cache[source_model] = (source_model, now + _MODEL_MAPPING_CACHE_TTL)
+    return source_model
 
 
 # Provider base URLs
@@ -501,6 +583,20 @@ async def proxy_request(
         target_host = urlparse(target_url).netloc or target_url
     except Exception:
         target_host = "(parse error)"
+
+    # Model mapping: ONLY for Anthropic protocol
+    # Maps request model to target model (e.g., claude-3-5-sonnet -> glm-5)
+    original_model = body.get("model") if body else None
+    if is_anthropic_format and body and original_model:
+        mapped_model = await _get_mapped_model(original_model)
+        if mapped_model != original_model:
+            body["model"] = mapped_model
+            logger.info(
+                "anthropic model mapped",
+                original=original_model,
+                mapped=mapped_model,
+            )
+
     logger.info(
         "proxy forward",
         path=path,

@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     # Master API Key for admin operations
     master_api_key: str = "change-me-in-production"
 
-    # Database
-    database_url: str = "sqlite:///./data/proxy.db"
+    # Database (use aiosqlite for async support)
+    database_url: str = "sqlite+aiosqlite:///./data/proxy.db"
 
     # Server (127.0.0.1 = local only; 0.0.0.0 = allow remote)
     host: str = "127.0.0.1"
@@ -71,6 +71,19 @@ class Settings(BaseSettings):
 
     # System prompts page size
     system_prompts_per_page: int = 50
+
+    # =====================================================================
+    # Database Maintenance (SQLite)
+    # =====================================================================
+
+    # WAL checkpoint interval in seconds (default: 5 minutes)
+    db_checkpoint_interval_seconds: int = 300
+
+    # Backup interval in hours (default: 24 hours)
+    db_backup_interval_hours: int = 24
+
+    # Number of backup files to keep (default: 7)
+    db_backup_keep_count: int = 7
 
     class Config:
         env_file = ".env"

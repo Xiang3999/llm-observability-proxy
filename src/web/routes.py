@@ -259,59 +259,39 @@ async def dashboard(
     success: str | None = None
 ):
     """Render the main dashboard with management features."""
-    # Use asyncio.gather to run independent DB queries in parallel
-    import asyncio
-
-    async def get_summary_stats():
-        result = await db.execute(
-            select(
-                func.count(RequestLog.id).label("total_requests"),
-                func.sum(RequestLog.total_tokens).label("total_tokens"),
-                func.avg(RequestLog.total_latency_ms).label("avg_latency")
-            )
+    # Run DB queries sequentially (SQLAlchemy sessions don't support concurrent access)
+    summary_result = (await db.execute(
+        select(
+            func.count(RequestLog.id).label("total_requests"),
+            func.sum(RequestLog.total_tokens).label("total_tokens"),
+            func.avg(RequestLog.total_latency_ms).label("avg_latency")
         )
-        return result.one()
+    )).one()
 
-    async def get_recent_requests():
-        result = await db.execute(
-            select(RequestLog)
-            .order_by(RequestLog.created_at.desc())
-            .limit(10)
-        )
-        return result.scalars().all()
+    recent_requests = (await db.execute(
+        select(RequestLog)
+        .order_by(RequestLog.created_at.desc())
+        .limit(10)
+    )).scalars().all()
 
-    async def get_proxy_names():
-        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-        return {pk.id: pk.name for pk in result.all()}
+    proxy_names = {pk.id: pk.name for pk in (await db.execute(select(ProxyKey.id, ProxyKey.name))).all()}
 
-    async def get_apps():
-        result = await db.execute(
-            select(ProxyKey, ProviderKey)
-            .join(ProviderKey, ProxyKey.provider_key_id == ProviderKey.id)
-            .order_by(ProxyKey.created_at.desc())
-        )
-        return result.all()
+    apps = (await db.execute(
+        select(ProxyKey, ProviderKey)
+        .join(ProviderKey, ProxyKey.provider_key_id == ProviderKey.id)
+        .order_by(ProxyKey.created_at.desc())
+    )).all()
 
-    async def get_provider_keys():
-        result = await db.execute(select(ProviderKey).order_by(ProviderKey.created_at.desc()))
-        return result.scalars().all()
+    provider_keys = (await db.execute(select(ProviderKey).order_by(ProviderKey.created_at.desc()))).scalars().all()
 
-    async def get_request_counts():
-        result = await db.execute(
-            select(RequestLog.proxy_key_id, func.count(RequestLog.id))
-            .group_by(RequestLog.proxy_key_id)
-        )
-        return {row[0]: row[1] for row in result.all()}
+    # Get model mappings
+    from src.models.model_mapping import ModelMapping
+    model_mappings = (await db.execute(select(ModelMapping).order_by(ModelMapping.created_at.desc()))).scalars().all()
 
-    # Execute all queries in parallel
-    summary_result, recent_requests, proxy_names, apps, provider_keys, request_counts = await asyncio.gather(
-        get_summary_stats(),
-        get_recent_requests(),
-        get_proxy_names(),
-        get_apps(),
-        get_provider_keys(),
-        get_request_counts(),
-    )
+    request_counts = {row[0]: row[1] for row in (await db.execute(
+        select(RequestLog.proxy_key_id, func.count(RequestLog.id))
+        .group_by(RequestLog.proxy_key_id)
+    )).all()}
 
     # Precompute table rows to avoid f-string nesting (Python 3.9 compat)
     provider_keys_rows = "".join([
@@ -344,6 +324,20 @@ async def dashboard(
             f'<button onclick="if(confirm({q}Delete this proxy key?{q})) window.location.href={q}/delete-proxy/{proxy_key.id}{q}" class="text-red-600 hover:text-red-900"><i class="fas fa-trash"></i> Delete</button></td></tr>'
         )
     proxy_keys_rows = "".join(_proxy_key_row(pk, provider, request_counts.get(pk.id, 0)) for pk, provider in apps)
+
+    # Model mappings table rows
+    model_mappings_rows = "".join([
+        f'<tr class="{"bg-gray-50" if not m.is_active else ""}">'
+        f'<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{m.source_model}</td>'
+        f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500"><span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">{m.target_model}</span></td>'
+        f'<td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">{m.description or "-"}</td>'
+        f'<td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full {"bg-green-100 text-green-800" if m.is_active else "bg-red-100 text-red-800"}">{"Active" if m.is_active else "Inactive"}</span></td>'
+        f'<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{m.created_at.strftime("%Y-%m-%d %H:%M")}</td>'
+        f'<td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">'
+        f'<button onclick="window.location.href=\'/toggle-model-mapping/{m.id}\'" class="{"text-green-600 hover:text-green-900" if not m.is_active else "text-yellow-600 hover:text-yellow-900"} mr-3"><i class="fas fa-power-off"></i> {"Activate" if not m.is_active else "Deactivate"}</button>'
+        f'<button onclick="if(confirm(\'Delete this model mapping?\')) window.location.href=\'/delete-model-mapping/{m.id}\'" class="text-red-600 hover:text-red-900"><i class="fas fa-trash"></i> Delete</button></td></tr>'
+        for m in model_mappings
+    ])
 
     recent_requests_rows = "".join(render_request_table_row(req, proxy_names=proxy_names) for req in recent_requests)
     provider_key_options = "".join([f'<option value="{pk.id}">{pk.name} ({pk.provider.value})</option>' for pk in provider_keys])
@@ -497,6 +491,51 @@ async def dashboard(
                 </div>
             </div>
 
+            <!-- Model Mappings Section -->
+            <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8" id="model-mappings">
+                <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-violet-600 flex items-center justify-center shadow-md shadow-purple-500/25">
+                            <i class="fas fa-exchange-alt text-white text-sm"></i>
+                        </div>
+                        <div>
+                            <h2 class="text-lg font-bold text-gray-800">Model Mappings</h2>
+                            <p class="text-xs text-gray-500 mt-0.5">Map source models to target models (Anthropic protocol only)</p>
+                            <p class="text-xs text-purple-600 mt-1">Supports: exact match, prefix (e.g., <code class="bg-purple-100 px-1 rounded">claude-*</code>), wildcard (<code class="bg-purple-100 px-1 rounded">*</code>)</p>
+                        </div>
+                    </div>
+                    <button onclick="document.getElementById('add-model-mapping-modal').classList.remove('hidden')"
+                            class="inline-flex items-center gap-2 bg-gradient-to-r from-purple-500 to-violet-600 text-white px-4 py-2 rounded-xl hover:shadow-lg hover:shadow-purple-500/30 transition-all duration-200 font-medium text-sm">
+                        <i class="fas fa-plus mr-1"></i>Add Mapping
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full">
+                        <thead>
+                            <tr class="border-b-2 border-gray-200/60">
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-sign-in-alt text-gray-400 text-xs mr-2"></i>Source Model
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-sign-out-alt text-gray-400 text-xs mr-2"></i>Target Model
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-info-circle text-gray-400 text-xs mr-2"></i>Description
+                                </th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                    <i class="fas fa-calendar text-gray-400 text-xs mr-2"></i>Created
+                                </th>
+                                <th class="px-6 py-4 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {model_mappings_rows if model_mappings_rows else '<tr><td colspan="6" class="px-6 py-8 text-center text-gray-500">No model mappings configured</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <!-- Recent Requests -->
             <div class="bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-gray-500/10 border border-gray-200/60 mb-8">
                 <div class="px-8 py-5 border-b border-gray-200/60 flex justify-between items-center">
@@ -636,6 +675,44 @@ async def dashboard(
                             Create Proxy Key
                         </button>
                         <button type="button" onclick="document.getElementById('add-proxy-modal').classList.add('hidden')"
+                                class="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400">
+                            Cancel
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Add Model Mapping Modal -->
+        <div id="add-model-mapping-modal" class="hidden fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full">
+            <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+                <h3 class="text-lg font-medium text-gray-900 mb-4">Add Model Mapping</h3>
+                <form action="/add-model-mapping" method="POST">
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Source Model</label>
+                        <input type="text" name="source_model" required
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                               placeholder="claude-3-5-sonnet-20241022">
+                        <p class="text-xs text-gray-500 mt-1">Exact model name, prefix pattern (e.g., <code class="bg-gray-100 px-1 rounded">claude-*</code>), or wildcard <code class="bg-gray-100 px-1 rounded">*</code></p>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Target Model</label>
+                        <input type="text" name="target_model" required
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                               placeholder="glm-5">
+                        <p class="text-xs text-gray-500 mt-1">The actual model to use on the upstream</p>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Description (Optional)</label>
+                        <input type="text" name="description"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500"
+                               placeholder="Mapping for Claude to GLM">
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="submit" class="flex-1 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700">
+                            Add Mapping
+                        </button>
+                        <button type="button" onclick="document.getElementById('add-model-mapping-modal').classList.add('hidden')"
                                 class="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400">
                             Cancel
                         </button>
@@ -893,25 +970,112 @@ async def add_proxy_key(
 @router.get("/delete-provider/{key_id}")
 async def delete_provider_key(key_id: str, db: DbSession):
     """Delete a provider key."""
+    from src.auth.middleware import get_auth_cache
+
     key_manager = KeyManager(db)
     await key_manager.delete_provider_key(key_id)
+
+    # Invalidate auth cache
+    get_auth_cache().invalidate_by_provider_key_id(key_id)
+
     return RedirectResponse(url="/dashboard?success=Provider+key+deleted", status_code=303)
 
 
 @router.get("/delete-proxy/{key_id}")
 async def delete_proxy_key(key_id: str, db: DbSession):
     """Delete a proxy key."""
+    from src.auth.middleware import get_auth_cache
+
     key_manager = KeyManager(db)
     await key_manager.delete_proxy_key(key_id)
+
+    # Invalidate auth cache
+    get_auth_cache().invalidate_by_proxy_key_id(key_id)
+
     return RedirectResponse(url="/dashboard?success=Proxy+key+deleted", status_code=303)
 
 
 @router.get("/toggle-proxy/{key_id}")
 async def toggle_proxy_key(key_id: str, db: DbSession):
     """Toggle proxy key active status."""
+    from src.auth.middleware import get_auth_cache
+
     key_manager = KeyManager(db)
     await key_manager.toggle_proxy_key(key_id)
+
+    # Invalidate auth cache
+    get_auth_cache().invalidate_by_proxy_key_id(key_id)
+
     return RedirectResponse(url="/dashboard?success=Proxy+key+status+updated", status_code=303)
+
+
+# Model Mapping Routes
+@router.post("/add-model-mapping")
+async def add_model_mapping(
+    source_model: str = Form(...),
+    target_model: str = Form(...),
+    description: str = Form(""),
+    db: DbSession = None
+):
+    """Add a new model mapping from the dashboard."""
+    from src.models.model_mapping import ModelMapping
+    from src.proxy.routes import clear_model_mapping_cache
+
+    # Check if source_model already exists
+    existing = await db.execute(
+        select(ModelMapping).where(ModelMapping.source_model == source_model)
+    )
+    if existing.scalar_one_or_none():
+        return RedirectResponse(url="/dashboard?error=Source+model+already+exists", status_code=303)
+
+    mapping = ModelMapping(
+        source_model=source_model,
+        target_model=target_model,
+        description=description if description else None,
+    )
+    db.add(mapping)
+    await db.commit()
+
+    # Clear cache so new mapping takes effect immediately
+    clear_model_mapping_cache()
+
+    return RedirectResponse(url="/dashboard?success=Model+mapping+added+successfully#model-mappings", status_code=303)
+
+
+@router.get("/delete-model-mapping/{mapping_id}")
+async def delete_model_mapping(mapping_id: str, db: DbSession):
+    """Delete a model mapping."""
+    from src.models.model_mapping import ModelMapping
+    from src.proxy.routes import clear_model_mapping_cache
+
+    result = await db.execute(
+        select(ModelMapping).where(ModelMapping.id == mapping_id)
+    )
+    mapping = result.scalar_one_or_none()
+    if mapping:
+        await db.delete(mapping)
+        await db.commit()
+        clear_model_mapping_cache()
+
+    return RedirectResponse(url="/dashboard?success=Model+mapping+deleted#model-mappings", status_code=303)
+
+
+@router.get("/toggle-model-mapping/{mapping_id}")
+async def toggle_model_mapping(mapping_id: str, db: DbSession):
+    """Toggle model mapping active status."""
+    from src.models.model_mapping import ModelMapping
+    from src.proxy.routes import clear_model_mapping_cache
+
+    result = await db.execute(
+        select(ModelMapping).where(ModelMapping.id == mapping_id)
+    )
+    mapping = result.scalar_one_or_none()
+    if mapping:
+        mapping.is_active = not mapping.is_active
+        await db.commit()
+        clear_model_mapping_cache()
+
+    return RedirectResponse(url="/dashboard?success=Model+mapping+status+updated#model-mappings", status_code=303)
 
 
 @router.get("/test-proxy/{key_id}")
