@@ -1403,7 +1403,7 @@ async def view_request_detail(
                     </div>
 
                     <!-- JSON Data Tab -->
-                    <div id="tab-json" class="tab-content hidden">
+                    <div id="tab-json" class="tab-content">
                         <script type="application/json" id="request-body-json">{request_body_js}</script>
                         <script type="application/json" id="response-body-json">{response_body_js}</script>
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1435,7 +1435,7 @@ async def view_request_detail(
                     </div>
 
                     <!-- Raw Data Tab -->
-                    <div id="tab-raw" class="tab-content hidden">
+                    <div id="tab-raw" class="tab-content">
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                             <div>
                                 <h3 class="font-semibold text-gray-800 mb-2"><i class="fas fa-arrow-up text-blue-500 mr-2"></i>Request Body (Raw)</h3>
@@ -1610,33 +1610,81 @@ async def view_request_detail(
                 c.querySelectorAll('.json-children').forEach(function(el) { el.style.display = 'none'; });
                 c.querySelectorAll('.json-toggle').forEach(function(el) { el.innerHTML = '&#9654;'; });
             }
-            document.addEventListener('DOMContentLoaded', initJsonTrees);
-            // Tab switching
-            document.querySelectorAll('.tab-btn').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    var tabId = this.getAttribute('data-tab');
-                    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
-                    document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); c.classList.add('hidden'); });
-                    this.classList.add('active');
-                    var tabContent = document.getElementById('tab-' + tabId);
-                    tabContent.classList.add('active');
-                    tabContent.classList.remove('hidden');
+            // Tab switching and role filter - wrapped in DOMContentLoaded
+            document.addEventListener('DOMContentLoaded', function() {
+                // Tab buttons
+                document.querySelectorAll('.tab-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var tabId = this.getAttribute('data-tab');
+                        document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+                        document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+                        this.classList.add('active');
+                        var tabContent = document.getElementById('tab-' + tabId);
+                        tabContent.classList.add('active');
+                        // Initialize JSON trees when switching to JSON tab
+                        if (tabId === 'json') { initJsonTrees(); }
+                    });
                 });
+                // Role filter buttons
+                document.querySelectorAll('.role-filter-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        document.querySelectorAll('.role-filter-btn').forEach(function(b) { b.classList.remove('active'); });
+                        this.classList.add('active');
+                        var role = this.getAttribute('data-role');
+                        document.querySelectorAll('.chat-message').forEach(function(row) {
+                            if (role === 'all' || row.getAttribute('data-role') === role) row.style.display = 'flex';
+                            else row.style.display = 'none';
+                        });
+                    });
+                });
+                // Initialize JSON trees on page load
+                initJsonTrees();
+                // Render chat history
+                renderChatHistory();
             });
             // Chat history rendering
             function renderChatHistory() {
                 var container = document.getElementById('chat-container');
                 var reqEl = document.getElementById('request-body-json');
-                if (!reqEl || !container) return;
-                var jsonData;
-                try { jsonData = JSON.parse(reqEl.textContent); } catch(e) { jsonData = null; }
-                if (!jsonData || !jsonData.messages || jsonData.messages.length === 0) {
+                var resEl = document.getElementById('response-body-json');
+                if (!container) return;
+                var reqData, resData;
+                try { reqData = JSON.parse(reqEl.textContent); } catch(e) { reqData = null; }
+                try { resData = JSON.parse(resEl.textContent); } catch(e) { resData = null; }
+                var html = '';
+                var allMessages = [];
+                // Add request messages
+                if (reqData && reqData.messages && reqData.messages.length > 0) {
+                    reqData.messages.forEach(function(msg, idx) {
+                        allMessages.push({ role: msg.role || 'unknown', content: msg.content, tool_calls: msg.tool_calls, source: 'request', index: idx + 1 });
+                    });
+                }
+                // Add response message (assistant)
+                if (resData) {
+                    var resContent = '';
+                    var resRole = 'assistant';
+                    if (resData.choices && resData.choices.length > 0) {
+                        var choice = resData.choices[0];
+                        if (choice.message) {
+                            resContent = choice.message.content || '';
+                            resRole = choice.message.role || 'assistant';
+                        } else if (choice.delta && choice.delta.content) {
+                            resContent = choice.delta.content;
+                        } else if (choice.text) {
+                            resContent = choice.text;
+                        }
+                    } else if (resData.content && Array.isArray(resData.content)) {
+                        resContent = resData.content.map(function(c) { return c.text || ''; }).join('');
+                    }
+                    if (resContent) {
+                        allMessages.push({ role: resRole, content: resContent, source: 'response', index: allMessages.length + 1 });
+                    }
+                }
+                if (allMessages.length === 0) {
                     container.innerHTML = '<div class="text-center text-gray-500 py-12"><div class="text-4xl mb-4">💬</div><div class="text-lg">暂无对话数据</div></div>';
                     return;
                 }
-                var messages = jsonData.messages;
-                var html = '';
-                messages.forEach(function(msg, index) {
+                allMessages.forEach(function(msg) {
                     var role = msg.role || 'unknown';
                     var content = msg.content || '';
                     var toolCalls = msg.tool_calls || [];
@@ -1653,26 +1701,27 @@ async def view_request_detail(
                     var contentLen = contentStr.length;
                     var needCollapse = role !== 'user' && contentLen > 300;
                     var rowClass = isUser ? 'chat-message user' : 'chat-message';
+                    var sourceBadge = msg.source === 'response' ? '<span class="ml-2 text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">API返回</span>' : '';
                     html += '<div class="' + rowClass + '" data-role="' + role + '">';
                     html += '<div class="chat-avatar ' + avatarClass + '">' + avatarIcon + '</div>';
                     html += '<div class="chat-content">';
-                    html += '<div class="chat-header"><span class="chat-role">' + roleName + '</span><div class="chat-meta"><span class="chat-index">#' + (index + 1) + '</span>' + (contentLen > 0 ? '<span>' + formatCharCount(contentLen) + '</span>' : '') + '</div></div>';
+                    html += '<div class="chat-header"><span class="chat-role">' + roleName + '</span>' + sourceBadge + '<div class="chat-meta"><span class="chat-index">#' + msg.index + '</span>' + (contentLen > 0 ? '<span>' + formatCharCount(contentLen) + '</span>' : '') + '</div></div>';
                     if (contentLen > 0) {
                         html += '<div class="chat-bubble ' + bubbleClass + '">';
                         if (needCollapse) {
-                            html += '<div class="collapse-header" onclick="toggleCollapse(' + index + ')"><span class="collapse-icon" id="collapseIcon' + index + '">▶</span><span>点击展开完整内容</span><span style="margin-left:auto;color:#9ca3af;">' + formatCharCount(contentLen) + '</span></div>';
-                            html += '<div class="collapse-content" id="collapseContent' + index + '"><div class="content-full">' + escapeHtml(contentStr) + '</div></div>';
+                            html += '<div class="collapse-header" onclick="toggleCollapse(' + msg.index + ')"><span class="collapse-icon" id="collapseIcon' + msg.index + '">▶</span><span>点击展开完整内容</span><span style="margin-left:auto;color:#9ca3af;">' + formatCharCount(contentLen) + '</span></div>';
+                            html += '<div class="collapse-content" id="collapseContent' + msg.index + '"><div class="content-full">' + escapeHtml(contentStr) + '</div></div>';
                             html += '<div class="content-preview">' + escapeHtml(contentStr.substring(0, 200)) + '...</div>';
                         } else { html += escapeHtml(contentStr); }
                         html += '</div>';
                     }
-                    html += renderToolCalls(toolCalls, index);
+                    html += renderToolCalls(toolCalls, msg.index);
                     html += '</div></div>';
                 });
                 container.innerHTML = html;
                 // Update stats
-                var stats = { total: messages.length, user: 0, assistant: 0, tool: 0, system: 0 };
-                messages.forEach(function(m) { if (stats[m.role] !== undefined) stats[m.role]++; });
+                var stats = { total: allMessages.length, user: 0, assistant: 0, tool: 0, system: 0 };
+                allMessages.forEach(function(m) { if (stats[m.role] !== undefined) stats[m.role]++; });
                 document.getElementById('msg-stats').innerHTML = '<span>📊 共 <strong>' + stats.total + '</strong> 条消息</span><span class="text-gray-300">|</span><span>👤 User: <strong>' + stats.user + '</strong></span><span class="text-gray-300">|</span><span>🤖 Assistant: <strong>' + stats.assistant + '</strong></span><span class="text-gray-300">|</span><span>🔧 Tool: <strong>' + stats.tool + '</strong></span><span class="text-gray-300">|</span><span>⚙️ System: <strong>' + stats.system + '</strong></span>';
                 // Update filter buttons
                 document.querySelectorAll('.role-filter-btn').forEach(function(btn) {
@@ -1711,19 +1760,6 @@ async def view_request_detail(
                 var content = document.getElementById('toolContent_' + msgIndex + '_' + tcIndex);
                 card.classList.toggle('expanded'); content.classList.toggle('expanded');
             }
-            // Role filter
-            document.querySelectorAll('.role-filter-btn').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    document.querySelectorAll('.role-filter-btn').forEach(function(b) { b.classList.remove('active'); });
-                    this.classList.add('active');
-                    var role = this.getAttribute('data-role');
-                    document.querySelectorAll('.chat-message').forEach(function(row) {
-                        if (role === 'all' || row.getAttribute('data-role') === role) row.style.display = 'flex';
-                        else row.style.display = 'none';
-                    });
-                });
-            });
-            document.addEventListener('DOMContentLoaded', renderChatHistory);
         </script>"""
         html = render_page(
             f"Request Detail - {req.id[:8]}",
