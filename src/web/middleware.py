@@ -42,18 +42,19 @@ class PageViewMiddleware(BaseHTTPMiddleware):
         # Process the request
         response = await call_next(request)
 
-        # Record page view asynchronously (non-blocking)
-        asyncio.create_task(
-            self._record_page_view(
-                path=path,
-                page_name=self._extract_page_name(path),
-                ip_address=ip_address,
-                user_agent=user_agent,
-                referer=referer,
-                method=request.method,
-                proxy_key_id=proxy_key_id,
-            )
-        )
+        # Record page view - disabled due to session conflict issues
+        # TODO: Fix async session conflict between middleware and route handlers
+        # asyncio.create_task(
+        #     self._record_page_view(
+        #         path=path,
+        #         page_name=self._extract_page_name(path),
+        #         ip_address=ip_address,
+        #         user_agent=user_agent,
+        #         referer=referer,
+        #         method=request.method,
+        #         proxy_key_id=proxy_key_id,
+        #     )
+        # )
 
         return response
 

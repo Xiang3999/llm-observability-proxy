@@ -745,7 +745,6 @@ async def list_requests(
 ):
     """List all requests with pagination and filters."""
     from sqlalchemy import func, select
-    import asyncio
 
     per_page = settings.default_per_page
     offset = (page - 1) * per_page
@@ -769,35 +768,22 @@ async def list_requests(
     if status:
         count_query = count_query.where(RequestLog.status_code == int(status))
 
-    async def get_count():
-        result = await db.execute(count_query)
-        return result.scalar()
+    # Execute queries sequentially (SQLAlchemy async sessions don't support concurrent operations)
+    result = await db.execute(count_query)
+    total_count = result.scalar()
 
-    async def get_requests():
-        q = query.offset(offset).limit(per_page)
-        result = await db.execute(q)
-        return list(result.scalars().all())
+    q = query.offset(offset).limit(per_page)
+    result = await db.execute(q)
+    requests_list = list(result.scalars().all())
 
-    async def get_proxy_names():
-        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-        return {pk.id: pk.name for pk in result.all()}
+    result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+    proxy_names = {pk.id: pk.name for pk in result.all()}
 
-    async def get_apps():
-        result = await db.execute(select(ProxyKey.id, ProxyKey.name))
-        return list(result.all())
+    result = await db.execute(select(ProxyKey.id, ProxyKey.name))
+    apps = list(result.all())
 
-    async def get_models():
-        result = await db.execute(select(RequestLog.model).distinct())
-        return [m[0] for m in result.all() if m[0]]
-
-    # Execute queries in parallel
-    total_count, requests_list, proxy_names, apps, models = await asyncio.gather(
-        get_count(),
-        get_requests(),
-        get_proxy_names(),
-        get_apps(),
-        get_models(),
-    )
+    result = await db.execute(select(RequestLog.model).distinct())
+    models = [m[0] for m in result.all() if m[0]]
 
     total_pages = (total_count + per_page - 1) // per_page
 
@@ -1381,41 +1367,85 @@ async def view_request_detail(
                 ''' if proxy_key else ''}
             </div>
 
-            <!-- Request/Response Body (collapsible JSON tree) -->
-            <script type="application/json" id="request-body-json">{request_body_js}</script>
-            <script type="application/json" id="response-body-json">{response_body_js}</script>
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-                <!-- Request Body -->
-                <div class="bg-white rounded-lg shadow">
-                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center flex-wrap gap-2">
-                        <h3 class="font-semibold text-gray-800">
-                            <i class="fas fa-arrow-up text-blue-500 mr-2"></i>Request Body
-                        </h3>
-                        <div class="flex gap-2">
-                            <button type="button" onclick="jsonTreeExpandAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
-                            <span class="text-gray-300">|</span>
-                            <button type="button" onclick="jsonTreeCollapseAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
-                        </div>
-                    </div>
-                    <div class="p-4">
-                        <div id="request-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[600px] font-mono"></div>
-                    </div>
+            <!-- Tab Navigation -->
+            <div class="bg-white rounded-lg shadow mb-6">
+                <div class="border-b border-gray-200">
+                    <nav class="flex -mb-px" id="detail-tabs">
+                        <button type="button" data-tab="chat" class="tab-btn active px-6 py-3 text-sm font-medium border-b-2 border-blue-500 text-blue-600">
+                            <i class="fas fa-comments mr-2"></i>对话历史
+                        </button>
+                        <button type="button" data-tab="json" class="tab-btn px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">
+                            <i class="fas fa-code mr-2"></i>JSON 数据
+                        </button>
+                        <button type="button" data-tab="raw" class="tab-btn px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">
+                            <i class="fas fa-file-alt mr-2"></i>原始数据
+                        </button>
+                    </nav>
                 </div>
 
-                <!-- Response Body -->
-                <div class="bg-white rounded-lg shadow">
-                    <div class="px-4 py-3 border-b border-gray-200 bg-gray-50 flex justify-between items-center flex-wrap gap-2">
-                        <h3 class="font-semibold text-gray-800">
-                            <i class="fas fa-arrow-down text-green-500 mr-2"></i>Response Body
-                        </h3>
-                        <div class="flex gap-2">
-                            <button type="button" onclick="jsonTreeExpandAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
-                            <span class="text-gray-300">|</span>
-                            <button type="button" onclick="jsonTreeCollapseAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
+                <!-- Tab Content -->
+                <div class="p-4">
+                    <!-- Chat History Tab -->
+                    <div id="tab-chat" class="tab-content active">
+                        <!-- Role Filter -->
+                        <div class="flex items-center gap-2 mb-4 flex-wrap">
+                            <span class="text-sm text-gray-500">筛选:</span>
+                            <button type="button" data-role="all" class="role-filter-btn active px-3 py-1 text-xs rounded-full bg-blue-500 text-white">全部</button>
+                            <button type="button" data-role="user" class="role-filter-btn px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">👤 User</button>
+                            <button type="button" data-role="assistant" class="role-filter-btn px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">🤖 Assistant</button>
+                            <button type="button" data-role="system" class="role-filter-btn px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">⚙️ System</button>
+                            <button type="button" data-role="tool" class="role-filter-btn px-3 py-1 text-xs rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300">🔧 Tool</button>
+                        </div>
+                        <!-- Message Stats -->
+                        <div id="msg-stats" class="flex items-center gap-4 mb-4 text-xs text-gray-600 bg-gray-50 px-3 py-2 rounded"></div>
+                        <!-- Chat Container -->
+                        <div id="chat-container" class="space-y-4 max-h-[600px] overflow-y-auto pr-2"></div>
+                    </div>
+
+                    <!-- JSON Data Tab -->
+                    <div id="tab-json" class="tab-content hidden">
+                        <script type="application/json" id="request-body-json">{request_body_js}</script>
+                        <script type="application/json" id="response-body-json">{response_body_js}</script>
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <!-- Request Body -->
+                            <div>
+                                <div class="flex justify-between items-center mb-2">
+                                    <h3 class="font-semibold text-gray-800"><i class="fas fa-arrow-up text-blue-500 mr-2"></i>Request Body</h3>
+                                    <div class="flex gap-2">
+                                        <button type="button" onclick="jsonTreeExpandAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
+                                        <span class="text-gray-300">|</span>
+                                        <button type="button" onclick="jsonTreeCollapseAll('request-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
+                                    </div>
+                                </div>
+                                <div id="request-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[500px] font-mono"></div>
+                            </div>
+                            <!-- Response Body -->
+                            <div>
+                                <div class="flex justify-between items-center mb-2">
+                                    <h3 class="font-semibold text-gray-800"><i class="fas fa-arrow-down text-green-500 mr-2"></i>Response Body</h3>
+                                    <div class="flex gap-2">
+                                        <button type="button" onclick="jsonTreeExpandAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Expand all</button>
+                                        <span class="text-gray-300">|</span>
+                                        <button type="button" onclick="jsonTreeCollapseAll('response-body-tree')" class="text-xs text-blue-600 hover:text-blue-800">Collapse all</button>
+                                    </div>
+                                </div>
+                                <div id="response-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[500px] font-mono"></div>
+                            </div>
                         </div>
                     </div>
-                    <div class="p-4">
-                        <div id="response-body-tree" class="json-tree-container bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[600px] font-mono"></div>
+
+                    <!-- Raw Data Tab -->
+                    <div id="tab-raw" class="tab-content hidden">
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div>
+                                <h3 class="font-semibold text-gray-800 mb-2"><i class="fas fa-arrow-up text-blue-500 mr-2"></i>Request Body (Raw)</h3>
+                                <pre class="bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[500px] font-mono">{json_full(req.request_body)}</pre>
+                            </div>
+                            <div>
+                                <h3 class="font-semibold text-gray-800 mb-2"><i class="fas fa-arrow-down text-green-500 mr-2"></i>Response Body (Raw)</h3>
+                                <pre class="bg-gray-900 text-gray-300 p-4 rounded text-xs overflow-auto max-h-[500px] font-mono">{json_full(req.response_body)}</pre>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1441,6 +1471,52 @@ async def view_request_detail(
             .json-tree-container .json-bracket { color: #cbd5e1; }
             .json-tree-container .json-count { color: #64748b; font-style: italic; }
             .json-tree-container .json-children { border-left: 1px solid #475569; margin-left: 8px; padding-left: 8px; }
+            /* Tab Styles */
+            .tab-content { display: none; }
+            .tab-content.active { display: block; }
+            .tab-btn { transition: all 0.2s; }
+            .tab-btn.active { border-bottom-color: #3b82f6; color: #2563eb; }
+            /* Chat Message Styles */
+            .chat-message { display: flex; gap: 12px; margin-bottom: 16px; animation: fadeIn 0.3s ease-out; }
+            .chat-message.user { flex-direction: row-reverse; }
+            @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+            .chat-avatar { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+            .chat-avatar.system { background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%); border: 2px solid #9ca3af; }
+            .chat-avatar.user { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border: 2px solid #60a5fa; }
+            .chat-avatar.assistant { background: linear-gradient(135deg, #10b981 0%, #059669 100%); border: 2px solid #34d399; }
+            .chat-avatar.tool { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); border: 2px solid #fbbf24; }
+            .chat-content { min-width: 0; max-width: 75%; flex: 1; }
+            .chat-header { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+            .chat-message.user .chat-header { flex-direction: row-reverse; }
+            .chat-role { font-size: 13px; font-weight: 600; color: #374151; }
+            .chat-meta { font-size: 11px; color: #6b7280; display: flex; align-items: center; gap: 6px; }
+            .chat-index { background: #e5e7eb; padding: 1px 6px; border-radius: 8px; font-size: 10px; color: #6b7280; }
+            .chat-bubble { border-radius: 16px; padding: 10px 14px; font-size: 14px; line-height: 1.5; word-break: break-word; box-shadow: 0 2px 8px rgba(0,0,0,0.1); position: relative; }
+            .chat-bubble.system { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+            .chat-bubble.user { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); color: #fff; }
+            .chat-bubble.assistant { background: #f9fafb; color: #1f2937; border: 1px solid #e5e7eb; }
+            .chat-bubble.tool { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+            /* Collapsible content */
+            .collapse-header { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 4px 8px; color: #6b7280; font-size: 11px; background: rgba(0,0,0,0.05); border-radius: 4px; margin-bottom: 4px; }
+            .collapse-header:hover { color: #374151; background: rgba(0,0,0,0.08); }
+            .collapse-icon { transition: transform 0.3s ease; font-size: 10px; color: #3b82f6; }
+            .collapse-icon.expanded { transform: rotate(90deg); }
+            .collapse-content { display: none; margin-top: 4px; }
+            .collapse-content.expanded { display: block; }
+            .content-preview { max-height: 60px; overflow: hidden; position: relative; white-space: pre-line; }
+            .content-full { max-height: 450px; overflow-y: auto; padding: 8px; background: rgba(0,0,0,0.05); border-radius: 6px; white-space: pre-line; }
+            /* Tool calls */
+            .tool-card { background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; margin-top: 8px; overflow: hidden; }
+            .tool-card-header { padding: 8px 12px; background: #fef3c7; font-size: 12px; color: #92400e; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+            .tool-card-header:hover { background: #fde68a; }
+            .tool-card-content { padding: 10px 12px; font-size: 11px; display: none; background: #fffbeb; border-top: 1px solid #fcd34d; }
+            .tool-card-content.expanded { display: block; }
+            .tool-card.expanded .tool-expand-icon { transform: rotate(180deg); }
+            .tool-expand-icon { transition: transform 0.3s ease; }
+            /* Role filter buttons */
+            .role-filter-btn { transition: all 0.2s; }
+            .role-filter-btn.active { background: #3b82f6 !important; color: #fff !important; }
+            .role-filter-btn:hover:not(.active) { background: #e5e7eb; }
         </style>
         <script>
             function escapeHtml(s) {
@@ -1535,6 +1611,119 @@ async def view_request_detail(
                 c.querySelectorAll('.json-toggle').forEach(function(el) { el.innerHTML = '&#9654;'; });
             }
             document.addEventListener('DOMContentLoaded', initJsonTrees);
+            // Tab switching
+            document.querySelectorAll('.tab-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    var tabId = this.getAttribute('data-tab');
+                    document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+                    document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); c.classList.add('hidden'); });
+                    this.classList.add('active');
+                    var tabContent = document.getElementById('tab-' + tabId);
+                    tabContent.classList.add('active');
+                    tabContent.classList.remove('hidden');
+                });
+            });
+            // Chat history rendering
+            function renderChatHistory() {
+                var container = document.getElementById('chat-container');
+                var reqEl = document.getElementById('request-body-json');
+                if (!reqEl || !container) return;
+                var jsonData;
+                try { jsonData = JSON.parse(reqEl.textContent); } catch(e) { jsonData = null; }
+                if (!jsonData || !jsonData.messages || jsonData.messages.length === 0) {
+                    container.innerHTML = '<div class="text-center text-gray-500 py-12"><div class="text-4xl mb-4">💬</div><div class="text-lg">暂无对话数据</div></div>';
+                    return;
+                }
+                var messages = jsonData.messages;
+                var html = '';
+                messages.forEach(function(msg, index) {
+                    var role = msg.role || 'unknown';
+                    var content = msg.content || '';
+                    var toolCalls = msg.tool_calls || [];
+                    var avatarClass = 'assistant', avatarIcon = '🤖', bubbleClass = 'assistant', roleName = 'Assistant', isUser = false;
+                    if (role === 'system') { avatarClass = 'system'; avatarIcon = '⚙️'; bubbleClass = 'system'; roleName = 'System'; }
+                    else if (role === 'user') { avatarClass = 'user'; avatarIcon = '👤'; bubbleClass = 'user'; roleName = 'User'; isUser = true; }
+                    else if (role === 'tool') { avatarClass = 'tool'; avatarIcon = '🔧'; bubbleClass = 'tool'; roleName = 'Tool'; }
+                    var contentStr = '';
+                    if (typeof content === 'string') { contentStr = content; }
+                    else if (Array.isArray(content)) {
+                        contentStr = content.map(function(item) { return typeof item === 'string' ? item : (item.text || JSON.stringify(item)); }).join('\\n');
+                    } else if (content) { contentStr = JSON.stringify(content, null, 2); }
+                    contentStr = contentStr.trim().replace(/\\n{3,}/g, '\\n\\n');
+                    var contentLen = contentStr.length;
+                    var needCollapse = role !== 'user' && contentLen > 300;
+                    var rowClass = isUser ? 'chat-message user' : 'chat-message';
+                    html += '<div class="' + rowClass + '" data-role="' + role + '">';
+                    html += '<div class="chat-avatar ' + avatarClass + '">' + avatarIcon + '</div>';
+                    html += '<div class="chat-content">';
+                    html += '<div class="chat-header"><span class="chat-role">' + roleName + '</span><div class="chat-meta"><span class="chat-index">#' + (index + 1) + '</span>' + (contentLen > 0 ? '<span>' + formatCharCount(contentLen) + '</span>' : '') + '</div></div>';
+                    if (contentLen > 0) {
+                        html += '<div class="chat-bubble ' + bubbleClass + '">';
+                        if (needCollapse) {
+                            html += '<div class="collapse-header" onclick="toggleCollapse(' + index + ')"><span class="collapse-icon" id="collapseIcon' + index + '">▶</span><span>点击展开完整内容</span><span style="margin-left:auto;color:#9ca3af;">' + formatCharCount(contentLen) + '</span></div>';
+                            html += '<div class="collapse-content" id="collapseContent' + index + '"><div class="content-full">' + escapeHtml(contentStr) + '</div></div>';
+                            html += '<div class="content-preview">' + escapeHtml(contentStr.substring(0, 200)) + '...</div>';
+                        } else { html += escapeHtml(contentStr); }
+                        html += '</div>';
+                    }
+                    html += renderToolCalls(toolCalls, index);
+                    html += '</div></div>';
+                });
+                container.innerHTML = html;
+                // Update stats
+                var stats = { total: messages.length, user: 0, assistant: 0, tool: 0, system: 0 };
+                messages.forEach(function(m) { if (stats[m.role] !== undefined) stats[m.role]++; });
+                document.getElementById('msg-stats').innerHTML = '<span>📊 共 <strong>' + stats.total + '</strong> 条消息</span><span class="text-gray-300">|</span><span>👤 User: <strong>' + stats.user + '</strong></span><span class="text-gray-300">|</span><span>🤖 Assistant: <strong>' + stats.assistant + '</strong></span><span class="text-gray-300">|</span><span>🔧 Tool: <strong>' + stats.tool + '</strong></span><span class="text-gray-300">|</span><span>⚙️ System: <strong>' + stats.system + '</strong></span>';
+                // Update filter buttons
+                document.querySelectorAll('.role-filter-btn').forEach(function(btn) {
+                    var r = btn.getAttribute('data-role');
+                    var count = r === 'all' ? stats.total : stats[r];
+                    btn.innerHTML = btn.innerHTML.replace(/\\s*\\(\\d+\\)$/, '') + ' (' + count + ')';
+                });
+            }
+            function formatCharCount(count) { return count >= 1000 ? (count / 1000).toFixed(1) + 'K chars' : count + ' chars'; }
+            function toggleCollapse(index) {
+                var icon = document.getElementById('collapseIcon' + index);
+                var content = document.getElementById('collapseContent' + index);
+                var row = content.closest('.chat-message');
+                var preview = row.querySelector('.content-preview');
+                if (content.classList.contains('expanded')) {
+                    content.classList.remove('expanded'); icon.classList.remove('expanded'); icon.textContent = '▶';
+                    if (preview) preview.style.display = 'block';
+                } else { content.classList.add('expanded'); icon.classList.add('expanded'); icon.textContent = '▼'; if (preview) preview.style.display = 'none'; }
+            }
+            function renderToolCalls(toolCalls, msgIndex) {
+                if (!toolCalls || toolCalls.length === 0) return '';
+                var html = '';
+                toolCalls.forEach(function(tc, tcIndex) {
+                    var funcName = tc.function && tc.function.name ? tc.function.name : 'unknown';
+                    var funcArgs = tc.function && tc.function.arguments ? tc.function.arguments : '{}';
+                    var argsStr = typeof funcArgs === 'string' ? funcArgs : JSON.stringify(funcArgs, null, 2);
+                    html += '<div class="tool-card" id="toolCard_' + msgIndex + '_' + tcIndex + '">';
+                    html += '<div class="tool-card-header" onclick="toggleToolCard(' + msgIndex + ',' + tcIndex + ')"><span><span style="margin-right:4px;">🔧</span>' + funcName + '</span><span>展开 ▼</span></div>';
+                    html += '<div class="tool-card-content" id="toolContent_' + msgIndex + '_' + tcIndex + '"><pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-family:monospace;">' + escapeHtml(argsStr) + '</pre></div>';
+                    html += '</div>';
+                });
+                return html;
+            }
+            function toggleToolCard(msgIndex, tcIndex) {
+                var card = document.getElementById('toolCard_' + msgIndex + '_' + tcIndex);
+                var content = document.getElementById('toolContent_' + msgIndex + '_' + tcIndex);
+                card.classList.toggle('expanded'); content.classList.toggle('expanded');
+            }
+            // Role filter
+            document.querySelectorAll('.role-filter-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.role-filter-btn').forEach(function(b) { b.classList.remove('active'); });
+                    this.classList.add('active');
+                    var role = this.getAttribute('data-role');
+                    document.querySelectorAll('.chat-message').forEach(function(row) {
+                        if (role === 'all' || row.getAttribute('data-role') === role) row.style.display = 'flex';
+                        else row.style.display = 'none';
+                    });
+                });
+            });
+            document.addEventListener('DOMContentLoaded', renderChatHistory);
         </script>"""
         html = render_page(
             f"Request Detail - {req.id[:8]}",

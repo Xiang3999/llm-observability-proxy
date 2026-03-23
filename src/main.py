@@ -16,7 +16,7 @@ from src.api.model_mapping import router as model_mapping_router
 from src.config import settings
 from src.models.database import init_db, start_maintenance_tasks, stop_maintenance_tasks
 from src.proxy.routes import router as proxy_router
-from src.web.middleware import PageViewMiddleware
+# from src.web.middleware import PageViewMiddleware  # Disabled due to session conflict
 from src.web.routes import router as web_router
 
 # Configure logging
@@ -90,8 +90,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add page view tracking middleware
-app.add_middleware(PageViewMiddleware)
+# Page view tracking middleware - disabled due to session conflict
+# app.add_middleware(PageViewMiddleware)
 
 # Configure CORS
 app.add_middleware(
