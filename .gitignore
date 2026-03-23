@@ -62,6 +62,12 @@ Thumbs.db
 # Temporary test files
 scripts/tests/test_*.py
 
+# Local scripts
+scripts/*.py
+
+# Data exports
+data/exports/
+
 # Claude Code local settings (may contain exposed API keys)
 .claude/
 
