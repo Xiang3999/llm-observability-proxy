@@ -15,10 +15,10 @@ class TestProxyKeyGeneration:
         """Test that generated keys have the correct format."""
         key = generate_proxy_key()
 
-        # Check format: sk-helicone-proxy-<random>-<uuid>
-        assert key.startswith("sk-helicone-proxy-")
+        # Check format: sk-proxy-<random>-<uuid>
+        assert key.startswith("sk-proxy-")
         parts = key.split("-")
-        assert len(parts) >= 5  # sk, helicone, proxy, random, uuid (with dashes)
+        assert len(parts) >= 4  # sk, proxy, random, uuid (with dashes)
 
     def test_generate_proxy_key_uniqueness(self):
         """Test that generated keys are unique."""
@@ -93,7 +93,7 @@ class TestKeyManager:
         mock_result.scalar_one_or_none.return_value = MagicMock()
         mock_db.execute.return_value = mock_result
 
-        await manager.validate_proxy_key("sk-helicone-proxy-test")
+        await manager.validate_proxy_key("sk-proxy-test")
 
         # Should call execute
         mock_db.execute.assert_called_once()

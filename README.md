@@ -32,7 +32,7 @@ A lightweight LLM API proxy for monitoring and analyzing LLM API calls across di
 - 💰 **Token Statistics** - Automatic calculation of prompt/completion/total tokens
 - 🔑 **Multi-Application Isolation** - Create independent API keys for different applications via Proxy Keys
 - 📈 **Analytics** - Analyze usage by application, time range, model, and more
-- 🎛️ **Web Dashboard** - Simple web interface to view logs and analytics
+- 🎛️ **Web Dashboard** - Interactive web interface with chat-style conversation view, JSON/raw data inspection
 - 🚀 **Semantic Cache** - Response caching based on semantic similarity (disabled by default, reduces redundant API calls)
 
 ## 🚀 Quick Start
@@ -51,8 +51,11 @@ pip install -r requirements.txt
 export MASTER_API_KEY="your-master-key"
 export DATABASE_URL="sqlite:///./data/proxy.db"
 
-# Start the service
+# Start the service (foreground)
 python -m src.main
+
+# Or run in background
+nohup python -m src.main > server.log 2>&1 &
 ```
 
 Access the dashboard at http://localhost:8000
@@ -188,15 +191,15 @@ export CACHE_SIMILARITY_THRESHOLD=0.95  # Return cache if similarity > 95%
 Cached responses include:
 ```json
 {
-  "helicone_cache_hit": true,
+  "cache_hit": true,
   "usage": {"cache_hit": true}
 }
 ```
 
 Response headers also include:
 ```
-X-Helicone-Cache-Hit: true
-X-Helicone-Cache-Similarity: 0.98
+X-Cache-Hit: true
+X-Cache-Similarity: 0.98
 ```
 
 ### Notes

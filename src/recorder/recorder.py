@@ -36,10 +36,10 @@ class RequestRecorder:
         if isinstance(body, dict):
             user_id = body.get("user")
             session_id = body.get("session_id")  # Extract session_id directly
-            # Extract custom properties (Helicone-style)
+            # Extract custom properties
             for key, value in body.items():
-                if key.startswith("helicone_property_"):
-                    properties[key.replace("helicone_property_", "")] = value
+                if key.startswith("property_"):
+                    properties[key.replace("property_", "")] = value
 
         request_log = RequestLog(
             id=request_log_id,  # Use pre-generated ID if provided

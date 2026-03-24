@@ -118,7 +118,7 @@ async def test_create_proxy_key(client, db_session):
     data = response.json()
     assert data["name"] == "Test App"
     assert "proxy_key" in data  # Should return the plain key once
-    assert data["proxy_key"].startswith("sk-helicone-proxy-")
+    assert data["proxy_key"].startswith("sk-proxy-")
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_proxy_request_with_invalid_key(client):
     response = await client.post(
         "/v1/chat/completions",
         json={"model": "gpt-4o-mini", "messages": []},
-        headers={"Authorization": "Bearer sk-helicone-proxy-invalid"}
+        headers={"Authorization": "Bearer sk-proxy-invalid"}
     )
     assert response.status_code == 401
 

@@ -492,7 +492,7 @@ async def proxy_request(
 ):
     """Proxy requests to LLM providers with minimal latency.
 
-    Optimizations (Helicone-style):
+    Optimizations:
     1. Auth cache - avoid DB on every request
     2. When cache disabled: no JSON parse on hot path (forward body bytes)
     3. Recording in background with own DB session (never block response)
@@ -532,7 +532,6 @@ async def proxy_request(
                     "total_tokens": 0,
                     "cache_hit": True,
                 },
-                "helicone_cache_hit": True,
             }
             asyncio.create_task(
                 record_response_async(
@@ -553,8 +552,8 @@ async def proxy_request(
                 status_code=200,
                 media_type="application/json",
                 headers={
-                    "X-Helicone-Cache-Hit": "true",
-                    "X-Helicone-Cache-Similarity": str(cache_result.similarity),
+                    "X-Cache-Hit": "true",
+                    "X-Cache-Similarity": str(cache_result.similarity),
                 },
             )
 
@@ -613,8 +612,6 @@ async def proxy_request(
             "host",
             "content-length",
             "authorization",
-            "helicone-auth",
-            "helicone-proxy-key",
         )
     }
     # Ensure JSON when we stream body as chunks (content= generator does not set Content-Type)

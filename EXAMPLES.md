@@ -70,7 +70,7 @@ curl -X POST "http://localhost:8000/api/proxy-keys" \
 {
   "id": "proxy-key-uuid",
   "name": "MyApp-Production",
-  "proxy_key": "sk-helicone-proxy-abc123-uuid",
+  "proxy_key": "sk-proxy-abc123-uuid",
   "provider_key_id": "provider-key-uuid",
   "created_at": "2024-01-01T00:00:00"
 }
@@ -90,7 +90,7 @@ from openai import OpenAI
 # 指向本地代理服务
 client = OpenAI(
     base_url="http://localhost:8000/v1",
-    api_key="sk-helicone-proxy-abc123-uuid"  # 你的 Proxy Key
+    api_key="sk-proxy-abc123-uuid"  # 你的 Proxy Key
 )
 
 response = client.chat.completions.create(
@@ -108,7 +108,7 @@ print(response.choices[0].message.content)
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer sk-helicone-proxy-abc123-uuid" \
+  -H "Authorization: Bearer sk-proxy-abc123-uuid" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o-mini",

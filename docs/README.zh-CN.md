@@ -32,7 +32,7 @@
 - 💰 **Token 统计** - 自动计算 prompt/completion/total tokens
 - 🔑 **多应用隔离** - 通过 Proxy Key 为不同应用创建独立的 API Key
 - 📈 **分析查询** - 按应用、时间、模型等维度分析使用情况
-- 🎛️ **Web Dashboard** - 简单的 Web 界面查看记录和分析
+- 🎛️ **Web Dashboard** - 交互式 Web 界面，支持对话式消息展示、JSON/原始数据查看、角色筛选等功能
 - 🚀 **语义缓存** - 基于语义相似度的响应缓存（默认关闭，可减少重复 API 调用）
 
 ## 🚀 快速开始
@@ -51,8 +51,11 @@ pip install -r requirements.txt
 export MASTER_API_KEY="your-master-key"
 export DATABASE_URL="sqlite:///./data/proxy.db"
 
-# 启动服务
+# 启动服务（前台运行）
 python -m src.main
+
+# 或后台运行
+nohup python -m src.main > server.log 2>&1 &
 ```
 
 访问 http://localhost:8000 查看 Dashboard
@@ -188,15 +191,15 @@ export CACHE_SIMILARITY_THRESHOLD=0.95  # 相似度超过 95% 返回缓存
 缓存命中的响应会包含以下标识：
 ```json
 {
-  "helicone_cache_hit": true,
+  "cache_hit": true,
   "usage": {"cache_hit": true}
 }
 ```
 
 响应头也会包含：
 ```
-X-Helicone-Cache-Hit: true
-X-Helicone-Cache-Similarity: 0.98
+X-Cache-Hit: true
+X-Cache-Similarity: 0.98
 ```
 
 ### 注意事项

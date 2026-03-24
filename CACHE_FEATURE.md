@@ -78,8 +78,8 @@ cache = SemanticCache(
 缓存命中的响应会包含以下 HTTP 头：
 
 ```
-X-Helicone-Cache-Hit: true
-X-Helicone-Cache-Similarity: 0.98
+X-Cache-Hit: true
+X-Cache-Similarity: 0.98
 ```
 
 ### 响应体
@@ -104,7 +104,6 @@ X-Helicone-Cache-Similarity: 0.98
     "total_tokens": 0,
     "cache_hit": true
   },
-  "helicone_cache_hit": true
 }
 ```
 

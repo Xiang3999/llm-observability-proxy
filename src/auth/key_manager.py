@@ -14,12 +14,12 @@ from src.models.request_log import RequestLog
 def generate_proxy_key() -> str:
     """Generate a new proxy key.
 
-    Format: sk-helicone-proxy-<random>-<uuid>
+    Format: sk-proxy-<random>-<uuid>
     """
     import uuid
     random_part = secrets.token_urlsafe(16)
     uuid_part = str(uuid.uuid4())
-    return f"sk-helicone-proxy-{random_part}-{uuid_part}"
+    return f"sk-proxy-{random_part}-{uuid_part}"
 
 
 def hash_key(key: str) -> str:

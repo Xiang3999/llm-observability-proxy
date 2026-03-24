@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 3600  # 1 hour default
     cache_max_size: int = 10000  # max cached entries
 
-    # Auth cache: avoid DB hit on every request (Helicone-style)
+    # Auth cache: avoid DB hit on every request
     auth_cache_ttl_seconds: int = 300  # 5 min
     auth_cache_max_size: int = 10_000
 

@@ -106,7 +106,7 @@ Data Storage:
 
 ```
 1. Client 发送请求到 Proxy
-   Authorization: Bearer sk-helicone-proxy-xxx
+   Authorization: Bearer sk-proxy-xxx
 
 2. Proxy 验证 Proxy Key
    - 从数据库查询 Proxy Key 对应的真实 Provider Key

@@ -16,7 +16,7 @@ from src.models.database import get_db
 
 logger = structlog.get_logger(__name__)
 
-# In-memory auth cache to avoid DB hit on every request (Helicone-style)
+# In-memory auth cache to avoid DB hit on every request
 _auth_cache: AuthCache | None = None
 
 
@@ -67,7 +67,7 @@ async def verify_proxy_key(
 ) -> ProxyAuthResult:
     """Verify a proxy key and return auth result.
 
-    Uses in-memory cache first (Helicone-style) to avoid DB round-trip on hot path.
+    Uses in-memory cache first to avoid DB round-trip on hot path.
     """
     cache = _get_auth_cache()
     cached = cache.get(bearer_token)

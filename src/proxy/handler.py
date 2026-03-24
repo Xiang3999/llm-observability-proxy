@@ -117,10 +117,10 @@ class ProxyHandler:
 
     def _prepare_headers(self, original_headers: dict[str, str]) -> dict[str, str]:
         """Prepare headers for the provider request."""
-        # Copy headers and remove helicone-specific headers
+        # Copy headers and remove proxy-specific headers
         headers = {
             k: v for k, v in original_headers.items()
-            if not k.lower().startswith("helicone-")
+            if not k.lower().startswith("x-proxy-")
         }
 
         # Set provider-specific auth header

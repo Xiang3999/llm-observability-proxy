@@ -1,6 +1,6 @@
 """In-memory auth cache for proxy key -> provider resolution.
 
-Reduces latency by avoiding a DB round-trip on every request (Helicone uses
+Reduces latency by avoiding a DB round-trip on every request.
 KV cache with ~12h TTL). Cache key = raw bearer token; value = auth result.
 """
 
